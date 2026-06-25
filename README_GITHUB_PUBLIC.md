@@ -27,6 +27,12 @@ npm run start
 npm run build
 ```
 
+## Captures d'ecran
+
+![Capture desktop](docs/github-captures/20-morphostyle-2026-06-25_03-17-30-desktop.png)
+
+![Capture mobile](docs/github-captures/20-morphostyle-2026-06-25_03-17-30-mobile.png)
+
 ## Variables d'environnement
 
 Copier `.env.example` vers `.env` en local puis remplir les valeurs privees.
