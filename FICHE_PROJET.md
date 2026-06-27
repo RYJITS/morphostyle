@@ -1,8 +1,8 @@
 # Morphostyle
 
 ## Liens vers l'application
-- Lien public: lien detecte mais masque par securite orchestrateur
-- GitHub: non detecte
+- Lien public: https://morphostyle.c2rdesign.com
+- GitHub: https://github.com/RYJITS/morphostyle
 
 ## A quoi sert le projet
 Morphostyle est une application IA de conseil visuel pour coiffure et style. Elle part d'une photo, recueille un profil de consultation, analyse la morphologie, propose des styles et genere des apercus realistes.
@@ -45,14 +45,11 @@ Le projet a ete concu comme un assistant de consultation: il combine analyse str
 - Messages de chargement et erreurs service sature
 
 ## Captures d'ecran
-- Aucune capture validee pour cette fiche.
+![Capture 1 - morphostyle](docs/captures/20-morphostyle-2026-06-25_03-17-30-desktop.png)
+
+![Capture 2 - morphostyle](docs/captures/20-morphostyle-2026-06-25_03-17-30-mobile.png)
 
 ## Mises a jour
 - Fiche actualisee depuis le registre orchestrateur et le catalogue projet.
-- Changements locaux detectes: relire la fiche apres validation des modifications.
-- Derniere mise a jour registre connue: 2026-06-21T21:46:02.186Z.
-
-## Derniere mise a jour
-2026-06-21T21:46:02.193Z
 
 > Fichier genere par l'orchestrateur pour le hub Site Ma Methode.

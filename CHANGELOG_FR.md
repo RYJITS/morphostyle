@@ -1,8 +1,8 @@
 # Changelog - morphostyle
 
-## 2026-06-21
+## Etat courant
 
 - Documentation projet synchronisee par l'orchestrateur global.
-- Statut courant: SENSITIVE_BLOCKED.
-- Securite: FAIL_SESSIONS.
-- Fonctionnement: FONCTIONNEL_AVEC_ALERTES.
+- Statut courant: PUBLIC_READY.
+- Securite: OK_PUBLIC.
+- Fonctionnement: FONCTIONNEL.

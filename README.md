@@ -1,32 +1,155 @@
-<div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
-</div>
+# Morphostyle
 
-# Run and deploy your AI Studio app
+## Rapport complet
 
-This contains everything you need to run your app locally.
+Ce depot public presente le concept, les fonctions, les choix de conception, les outils utilises, les commandes locales et les captures d'ecran de l'application. Il est genere par l'orchestrateur uniquement apres validation de publication publique.
 
-View your app in AI Studio: https://ai.studio/apps/drive/10dDcgWoNH7yhJXuDBBWmZlneVpJW7j0R
+## Concept
 
-## Run Locally
+Application IA de conseil coiffure et style. Elle analyse une photo, propose des styles adaptes puis genere des apercus et angles supplementaires.
 
-**Prerequisites:**  Node.js
+Transformer une photo et un besoin de style en recommandations visuelles exploitables.
+
+Public vise: Design, conseil visuel, coiffure, experimentation IA et outil creatif.
 
 
-1. Install dependencies:
-   `npm install`
-2. Run the API server:
-   `npm run dev:api`
-3. Run the app:
-   `npm run dev`
+## Fonctionnement de l'application
 
-The project now starts with `VITE_FREE_IMAGE_PROVIDER=comfy-preview`, `VITE_IMAGE_TO_IMAGE_PROVIDER=server`, and `SERVER_IMAGE_TO_IMAGE_PROVIDER=free-chain` in [.env.local](.env.local). In this mode, no Google, Gemini, Pollinations, Puter, or FAL paid image API is used for preview cards or for the final local retouch.
+L'utilisateur charge une image, renseigne le genre, l'age, le niveau d'entretien, le style de vie et la longueur souhaitee. Gemini analyse ensuite la morphologie avec un schema JSON strict et renvoie la forme du visage, le conseil professionnel et une liste de styles recommandes. L'utilisateur selectionne jusqu'a quatre styles, genere les looks, puis peut demander des angles supplementaires gauche, droite ou dos.
 
-The free final chain is:
+## Fonctions de l'application
 
-- Local ComfyUI SDXL masked inpainting for the uploaded portrait.
-- AI Horde anonymous inpainting as a remote free fallback if local ComfyUI is unavailable.
+- Analyse la morphologie a partir d'une image.
+- Propose des styles recommandes selon le profil.
+- Genere des apercus et variantes de coiffure.
+- Garde l'identite, la lumiere et le contexte pendant les transformations.
+- Uploader une photo
+- Renseigner un profil de consultation
+- Analyser la morphologie
+- Recevoir des conseils professionnels
+- Proposer des styles adaptes
+- Selectionner jusqu'a quatre looks
+- Generer des apercus realistes
+- Demander des angles supplementaires
+- Eviter les suggestions barbe pour enfant/bebe
 
-Preview cards use local ComfyUI SDXL image-to-image from the uploaded portrait, so each proposed haircut keeps the user's photo as the visual reference. If no source photo is available, ComfyUI text-to-image can still generate a preview; local SVG hairstyle visuals remain as a last fallback if ComfyUI is unavailable.
+## Actualisations et evolution
 
-Optional: `VITE_IMAGE_TO_IMAGE_PROVIDER=puter-flux`, `hf-kontext`, and `local-retouch` can still be tested manually, but they are not the default path.
+- Statut courant: SENSITIVE_BLOCKED.
+- Securite: FAIL_SESSIONS.
+- Fonctionnement: FONCTIONNEL_AVEC_ALERTES.
+
+## Options et conception
+
+Le projet a ete concu comme un assistant de consultation: il combine analyse structuree, recommandations lisibles et generation image-to-image. Les prompts insistent sur la conservation de l'identite, du fond, des vetements et de la lumiere afin de modifier surtout la coiffure ou la barbe.
+
+### Outils, IA et moteurs utilises
+
+- Gemini pour analyse morphologique
+- Gemini image-to-image
+- Schema JSON strict
+- Prompts de conservation identite/fond/lumiere
+- Generation quick preview
+- Generation multi-angle
+- Retry automatique
+- Gestion saturation service
+- React
+- Vite
+- TypeScript
+- @google/genai
+- Gemini pour analyse JSON
+- Upload base64
+- Schemas stricts
+- Gestion d'erreurs et retry
+
+### Options techniques detectees
+
+- Type de projet: node
+- Gestionnaire: npm
+- Nom package: morphostyle-ai
+- Version: 1.0.0
+- Lien public: https://morphostyle.c2rdesign.com
+- Statut securite: OK_PUBLIC
+
+### Stack et dependances principales
+
+- Vite/Dev server
+- React
+- Node.js
+- Vite
+- TypeScript
+- @google/genai
+- Gemini pour analyse JSON
+- Gemini image-to-image
+- Upload base64
+- Schemas stricts
+- Generation multi-angle
+- Gestion d'erreurs et retry
+
+### Scripts disponibles
+
+- build: tsc && vite build
+- dev: vite
+- dev:api: node server/index.mjs
+- lint: tsc --noEmit
+- preview: vite preview
+- start: node server/index.mjs
+- validate:recipes: node scripts/validate-preview-recipes.mjs
+
+### Dependances applicatives
+
+- @google/genai ^1.34.0
+- lucide-react ^0.462.0
+- react ^19.0.0
+- react-dom ^19.0.0
+
+### Dependances de developpement
+
+- @types/node ^22.10.2
+- @types/react ^19.0.0
+- @types/react-dom ^19.0.0
+- @vitejs/plugin-react ^6.0.2
+- autoprefixer ^10.4.20
+- postcss ^8.4.49
+- tailwindcss ^3.4.16
+- typescript ^5.7.2
+- vite ^8.0.16
+
+## Automatisations et comportements internes
+
+- Retry automatique avec delai exponentiel
+- Analyse morphologique en JSON strict
+- Regles age enfant/bebe sans barbe
+- Generation rapide de previews
+- Generation des looks selectionnes
+- Conservation automatique de l'identite et du contexte dans le prompt
+- Generation des angles front/left/right/back
+- Messages de chargement et erreurs service sature
+
+## Installation locale
+
+```powershell
+npm install
+```
+
+## Lancement
+
+```powershell
+npm run dev
+npm run start
+npm run build
+```
+
+## Captures d'ecran
+
+![Capture desktop](docs/github-captures/20-morphostyle-2026-06-28_01-20-21-desktop.png)
+
+![Capture mobile](docs/github-captures/20-morphostyle-2026-06-28_01-20-21-mobile.png)
+
+## Variables d'environnement
+
+Copier `.env.example` vers `.env` en local puis remplir les valeurs privees.
+
+## Securite
+
+Ne jamais publier `.env`, tokens, sessions, logs sensibles, cles privees ou donnees personnelles.
