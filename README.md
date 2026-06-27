@@ -35,9 +35,9 @@ L'utilisateur charge une image, renseigne le genre, l'age, le niveau d'entretien
 
 ## Actualisations et evolution
 
-- Statut courant: SENSITIVE_BLOCKED.
-- Securite: FAIL_SESSIONS.
-- Fonctionnement: FONCTIONNEL_AVEC_ALERTES.
+- Statut courant: PUBLIC_READY.
+- Securite: OK_PUBLIC.
+- Fonctionnement: FONCTIONNEL.
 
 ## Options et conception
 
@@ -142,9 +142,9 @@ npm run build
 
 ## Captures d'ecran
 
-![Capture desktop](docs/github-captures/20-morphostyle-2026-06-28_01-20-21-desktop.png)
+![Capture desktop](docs/github-captures/20-morphostyle-2026-06-28_01-34-42-desktop.png)
 
-![Capture mobile](docs/github-captures/20-morphostyle-2026-06-28_01-20-21-mobile.png)
+![Capture mobile](docs/github-captures/20-morphostyle-2026-06-28_01-34-42-mobile.png)
 
 ## Variables d'environnement
 
