@@ -1,48 +1,52 @@
-# Morphostyle
+# MorphoStyle AI - Assistant de conseil coiffure et style par IA
 
 ## Liens vers l'application
-- Lien public: https://morphostyle.c2rdesign.com
-- GitHub: https://github.com/RYJITS/morphostyle
+- Lien public: [https://morphostyle.c2rdesign.com](https://morphostyle.c2rdesign.com)
+- GitHub: [https://github.com/RYJITS/morphostyle](https://github.com/RYJITS/morphostyle)
 
 ## A quoi sert le projet
-Morphostyle est une application IA de conseil visuel pour coiffure et style. Elle part d'une photo, recueille un profil de consultation, analyse la morphologie, propose des styles et genere des apercus realistes.
+MorphoStyle AI est une application web qui permet aux utilisateurs de recevoir des conseils personnalisés en coiffure et style grâce à l'analyse morphologique automatisée de leur visage. L'application combine une interface intuitive avec des modèles d'IA spécialisés pour générer des aperçus réalistes de styles adaptés, tout en conservant les caractéristiques uniques de chaque utilisateur. Elle s'adresse aussi bien aux particuliers qu'aux professionnels souhaitant visualiser rapidement des propositions créatives.
 
 ## Fonctionnement de l'application ou du projet
-L'utilisateur charge une image, renseigne le genre, l'age, le niveau d'entretien, le style de vie et la longueur souhaitee. Gemini analyse ensuite la morphologie avec un schema JSON strict et renvoie la forme du visage, le conseil professionnel et une liste de styles recommandes. L'utilisateur selectionne jusqu'a quatre styles, genere les looks, puis peut demander des angles supplementaires gauche, droite ou dos.
+L'application suit un workflow en cinq étapes : 1) L'utilisateur charge une photo de son visage et remplit un formulaire de profil (âge, type de visage, préférences). 2) L'IA analyse la morphologie du visage via un schéma JSON strict et génère des recommandations de styles adaptés. 3) L'utilisateur sélectionne jusqu'à quatre styles parmi les propositions générées. 4) L'IA génère des aperçus réalistes en conservant l'identité, la lumière, les vêtements et le contexte de la photo originale. 5) L'utilisateur peut demander des angles supplémentaires (profil gauche/droit, dos) pour une visualisation complète. Le système gère automatiquement les erreurs et les retries en cas de saturation du service.
 
 ## Comment le projet a ete construit
-Le projet a ete concu comme un assistant de consultation: il combine analyse structuree, recommandations lisibles et generation image-to-image. Les prompts insistent sur la conservation de l'identite, du fond, des vetements et de la lumiere afin de modifier surtout la coiffure ou la barbe.
+Le projet a été conçu comme un assistant de consultation en coiffure, combinant analyse structuree, recommandations lisibles et génération d'images réalistes. Les choix clés incluent : l'utilisation d'un schéma JSON strict pour l'analyse morphologique afin d'assurer la précision des recommandations, des prompts optimisés pour conserver l'identité et le contexte de la photo dans les aperçus générés, une gestion automatique des retries avec délai exponentiel pour améliorer la robustesse, et une interface utilisateur intuitive pour faciliter l'expérience. L'architecture modulaire sépare clairement le frontend (React avec Vite) du backend (Node.js), avec une gestion centralisée des erreurs et des validations. Le responsive design permet une utilisation optimale sur mobile et desktop.
+
+## Installation et utilisation
+### Installation
+[object Object]
+
+### Utilisation
+Après installation, l'utilisateur accède à l'application via un navigateur web. Il commence par charger une photo de son visage, puis remplit un formulaire de profil (âge, type de visage, préférences). L'application analyse automatiquement la morphologie et propose des styles adaptés. L'utilisateur sélectionne jusqu'à quatre styles, puis l'IA génère des aperçus réalistes en conservant ses caractéristiques uniques. Il peut ensuite demander des angles supplémentaires (profil gauche/droit, dos) pour une visualisation complète. Le système gère automatiquement les erreurs et les retries en cas de saturation du service.
 
 ## Fonctions disponibles dans l'application
-- Uploader une photo
-- Renseigner un profil de consultation
-- Analyser la morphologie
-- Recevoir des conseils professionnels
-- Proposer des styles adaptes
-- Selectionner jusqu'a quatre looks
-- Generer des apercus realistes
-- Demander des angles supplementaires
-- Eviter les suggestions barbe pour enfant/bebe
+- Analyse morphologique automatique du visage à partir d'une photo
+- Génération de recommandations de styles de coiffure ou barbe adaptés
+- Création d'aperçus réalistes en conservant l'identité, la lumière et le contexte
+- Génération d'angles supplémentaires (face, profil gauche/droit, dos)
+- Conservation automatique des vêtements, du fond et de l'éclairage
+- Gestion des erreurs et retries automatiques avec délai exponentiel
+- Validation automatique des âges pour éviter les suggestions inappropriées
+- Interface responsive adaptée aux mobiles et desktop
 
 ## Outils, IA et moteurs en arriere-plan
-- Gemini pour analyse morphologique
-- Gemini image-to-image
-- Schema JSON strict
-- Prompts de conservation identite/fond/lumiere
-- Generation quick preview
-- Generation multi-angle
-- Retry automatique
-- Gestion saturation service
+- React pour l'interface utilisateur
+- Vite comme serveur de développement et outil de build
+- Node.js pour le backend et la gestion des scripts
+- @google/genai pour l'interaction avec les modèles d'IA
+- Tailwind CSS pour le style et la mise en page
+- TypeScript pour le typage statique
+- ES Modules pour la gestion des dépendances
+- Git pour le versionnage du code
 
 ## Automatisations integrees
-- Retry automatique avec delai exponentiel
-- Analyse morphologique en JSON strict
-- Regles age enfant/bebe sans barbe
-- Generation rapide de previews
-- Generation des looks selectionnes
-- Conservation automatique de l'identite et du contexte dans le prompt
-- Generation des angles front/left/right/back
-- Messages de chargement et erreurs service sature
+- Analyse morphologique automatique via un schéma JSON strict
+- Génération rapide de prévisualisations réalistes
+- Génération des angles supplémentaires (face, profil gauche/droit, dos)
+- Retries automatiques en cas de saturation du service avec délai exponentiel
+- Validation automatique des âges pour éviter les suggestions inappropriées
+- Conservation automatique de l'identité, de la lumière et du contexte dans les prompts
 
 ## Captures d'ecran
 ![Capture 1 - morphostyle](docs/captures/20-morphostyle-2026-06-25_03-17-30-desktop.png)
@@ -50,6 +54,15 @@ Le projet a ete concu comme un assistant de consultation: il combine analyse str
 ![Capture 2 - morphostyle](docs/captures/20-morphostyle-2026-06-25_03-17-30-mobile.png)
 
 ## Mises a jour
-- Fiche actualisee depuis le registre orchestrateur et le catalogue projet.
+- Optimisation des prompts pour une meilleure conservation de l'identité et du contexte dans les aperçus générés
+- Ajout de la gestion automatique des retries avec délai exponentiel en cas de saturation du service d'IA
+- Validation stricte des âges pour exclure les suggestions inappropriées (ex : barbe pour enfants)
+- Amélioration de la robustesse des schémas JSON pour l'analyse morphologique
+- Passage en statut PUBLIC_READY avec validation de sécurité OK_PUBLIC
+- Optimisation des prompts pour une meilleure conservation de l'identité et du contexte dans les aperçus générés
+- Ajout de la gestion automatique des retries avec délai exponentiel en cas de saturation du service d'IA
+- Validation stricte des âges pour exclure les suggestions inappropriées (ex : barbe pour enfants)
+- Amélioration de la robustesse des schémas JSON pour l'analyse morphologique
+- Passage en statut PUBLIC_READY avec validation de sécurité OK_PUBLIC
 
 > Fichier genere par l'orchestrateur pour le hub Site Ma Methode.
