@@ -1,9 +1,11 @@
 # Installation - morphostyle
 
-Chemin: `D:\00_Cerveau_IA\Projet\20_morphostyle`
+```powershell
+git clone https://github.com/RYJITS/morphostyle.git
+cd morphostyle
+```
 
 ```powershell
-cd "D:\00_Cerveau_IA\Projet\20_morphostyle"
 npm install
 npm run dev
 ```

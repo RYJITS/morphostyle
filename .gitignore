@@ -75,3 +75,16 @@ docs/daily-tests/evidence/
 *.7z
 *.rar
 *.bak
+
+# Orchestrateur - publication GitHub publique
+reports/
+automatisations/99_Resultats/
+workflow_app/data/
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.venv/
+venv/
+_tmp/
+searxng-src/
+*.pyc
