@@ -3131,9 +3131,9 @@ const serveStatic = async (req, res) => {
   }
 };
 
-await loadLocalEnv();
+export const loadMorphoStyleEnvironment = loadLocalEnv;
 
-createServer(async (req, res) => {
+export const handleMorphoStyleRequest = async (req, res) => {
   res.setHeader("X-Content-Type-Options", "nosniff");
 
   if (await handleApi(req, res)) return;
@@ -3145,6 +3145,17 @@ createServer(async (req, res) => {
   }
 
   sendJson(res, 405, { ok: false, error: "Method not allowed" });
-}).listen(PORT, () => {
-  console.log(`MorphoStyle API ready on port ${PORT}`);
-});
+};
+
+export const startMorphoStyleServer = async () => {
+  await loadMorphoStyleEnvironment();
+  createServer(handleMorphoStyleRequest).listen(PORT, () => {
+    console.log(`MorphoStyle API ready on port ${PORT}`);
+  });
+};
+
+const isCliEntry = path.resolve(process.argv[1] || "") === fileURLToPath(import.meta.url);
+
+if (isCliEntry) {
+  await startMorphoStyleServer();
+}
