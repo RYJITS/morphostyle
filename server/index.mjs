@@ -3133,8 +3133,6 @@ const serveStatic = async (req, res) => {
 
 await loadLocalEnv();
 
-const HOST = process.env.HOST || "0.0.0.0";
-
 createServer(async (req, res) => {
   res.setHeader("X-Content-Type-Options", "nosniff");
 
@@ -3147,6 +3145,6 @@ createServer(async (req, res) => {
   }
 
   sendJson(res, 405, { ok: false, error: "Method not allowed" });
-}).listen(PORT, HOST, () => {
-  console.log(`MorphoStyle API ready on http://${HOST}:${PORT}`);
+}).listen(PORT, () => {
+  console.log(`MorphoStyle API ready on port ${PORT}`);
 });
