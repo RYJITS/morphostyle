@@ -1,5 +1,5 @@
 import { GoogleGenAI, Type } from "@google/genai";
-import { AnalysisResult, ConsultationData, AdditionalViews, HairstyleRecipe } from "../types";
+import { AnalysisResult, ConsultationData, AdditionalViews, HairstyleRecipe, StyleRecommendation } from "../types";
 
 const MAX_RETRIES = 2;
 const INITIAL_DELAY = 1500;
@@ -13,6 +13,9 @@ const IMAGE_TO_IMAGE_ENDPOINT = process.env.IMAGE_TO_IMAGE_ENDPOINT || "/api/gen
 const IMAGE_TO_IMAGE_TIMEOUT_MS = Math.max(60000, Number(process.env.IMAGE_TO_IMAGE_TIMEOUT_MS || 180000));
 const USE_FREE_IMAGE_TO_IMAGE_FALLBACKS = process.env.FREE_IMAGE_TO_IMAGE_FALLBACKS === "true";
 const FREE_PREVIEW_ENDPOINT = process.env.FREE_PREVIEW_ENDPOINT || "/api/free-preview";
+const ALIBABA_UPLOAD_RECOMMENDATIONS_ENDPOINT = process.env.ALIBABA_UPLOAD_RECOMMENDATIONS_ENDPOINT || "/api/alibaba-upload-recommendations";
+const OPENAI_UPLOAD_RECOMMENDATIONS_ENDPOINT = process.env.OPENAI_UPLOAD_RECOMMENDATIONS_ENDPOINT || "/api/openai-upload-recommendations";
+const OPENAI_SELECTED_RESULT_ENDPOINT = process.env.OPENAI_SELECTED_RESULT_ENDPOINT || "/api/openai-selected-result";
 const PUTER_FLUX_MODEL = process.env.PUTER_FLUX_MODEL || "black-forest-labs/flux.1-kontext-pro";
 const HF_KONTEXT_SPACE_URL = (process.env.HF_KONTEXT_SPACE_URL || "https://black-forest-labs-flux-1-kontext-dev.hf.space").replace(/\/$/, "");
 const HF_KONTEXT_STEPS = Number(process.env.HF_KONTEXT_STEPS || 20);
@@ -68,6 +71,107 @@ export const isPuterFluxImageToImageMode = () => USE_PUTER_FLUX_IMAGE_TO_IMAGE;
 export const isHuggingFaceKontextImageToImageMode = () => USE_HF_KONTEXT_IMAGE_TO_IMAGE;
 export const isLocalRetouchImageToImageMode = () => USE_LOCAL_RETOUCH_IMAGE_TO_IMAGE;
 export const isImageToImageMode = () => USE_IMAGE_TO_IMAGE;
+
+const getOpenAiClientId = () => {
+  const key = "morphostyle_openai_client_id";
+  try {
+    const existing = window.localStorage.getItem(key);
+    if (existing) return existing;
+    const created = `ms-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
+    window.localStorage.setItem(key, created);
+    return created;
+  } catch {
+    return "morphostyle-browser-client";
+  }
+};
+
+export const isOpenAiUploadStyle = (style?: Pick<StyleRecommendation, "sourceProvider" | "id"> | null) =>
+  style?.sourceProvider === "openai-upload" || String(style?.id || "").startsWith("openai-upload-");
+
+export const generateOpenAiUploadRecommendations = async (
+  originalBase64: string,
+  consultation: ConsultationData
+): Promise<AnalysisResult> => {
+  const response = await fetchWithTimeout(OPENAI_UPLOAD_RECOMMENDATIONS_ENDPOINT, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      imageBase64: originalBase64,
+      consultation,
+      clientId: getOpenAiClientId()
+    })
+  }, 720000);
+
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok || !payload.ok) {
+    throw new Error(payload.error || `OpenAI indisponible: HTTP ${response.status}`);
+  }
+
+  return {
+    faceShape: payload.faceShape || "morphologie personnalisee",
+    hairTexture: payload.hairTexture || "Texture detectee depuis la photo",
+    skinTone: payload.skinTone || "Teint preserve",
+    detectedGender: payload.detectedGender || consultation.gender,
+    professionalAdvice: payload.professionalAdvice || "Photo chargee traitee avec OpenAI Image.",
+    recommendedStyles: (payload.recommendedStyles || []) as StyleRecommendation[],
+    generationSessionId: payload.generationSessionId,
+    quota: payload.quota
+  };
+};
+
+export const generateOpenAiSelectedResult = async (
+  originalBase64: string,
+  consultation: ConsultationData,
+  style: StyleRecommendation,
+  generationSessionId = style.generationSessionId || ""
+) => {
+  const response = await fetchWithTimeout(OPENAI_SELECTED_RESULT_ENDPOINT, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      imageBase64: originalBase64,
+      consultation,
+      style,
+      generationSessionId,
+      clientId: getOpenAiClientId()
+    })
+  }, 720000);
+
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok || !payload.ok) {
+    throw new Error(payload.error || `OpenAI indisponible: HTTP ${response.status}`);
+  }
+
+  return payload.proposal;
+};
+
+export const generateAlibabaUploadRecommendations = async (
+  originalBase64: string,
+  consultation: ConsultationData
+): Promise<AnalysisResult> => {
+  const response = await fetchWithTimeout(ALIBABA_UPLOAD_RECOMMENDATIONS_ENDPOINT, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      imageBase64: originalBase64,
+      consultation
+    })
+  }, 720000);
+
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok || !payload.ok) {
+    throw new Error(payload.error || `Alibaba indisponible: HTTP ${response.status}`);
+  }
+
+  return {
+    faceShape: payload.faceShape || "morphologie personnalisee",
+    hairTexture: payload.hairTexture || "Texture detectee depuis la photo",
+    skinTone: payload.skinTone || "Teint preserve",
+    detectedGender: payload.detectedGender || consultation.gender,
+    professionalAdvice: payload.professionalAdvice || "Photo chargee traitee avec la methode Alibaba haute qualite.",
+    recommendedStyles: (payload.recommendedStyles || []) as StyleRecommendation[]
+  };
+};
 
 const normalizeStyle = (style: any) => ({
   id: style?.id || "demo-style",
@@ -1630,7 +1734,7 @@ const getPersonalizedStyles = (faceShape: string, beardStyle: string, data: Cons
     ? selected
     : [...selected, ...compatibleRanked.filter(style => !selected.some(item => item.id === style.id))]
         .slice(0, 4);
-  const finalStyles = fallback.length >= 4 || data.targetLength !== "any"
+  const finalStyles = fallback.length >= 4
     ? fallback
     : [...fallback, ...broadFallback.filter(style => !fallback.some(item => item.id === style.id))].slice(0, 4);
   return finalStyles.map(style => ({
@@ -1649,7 +1753,7 @@ const createPreferenceAdvice = (data: ConsultationData, faceShape: string) =>
   `Analyse basee sur la photo originale: morphologie ${faceShape}, ${labelForLength(data.targetLength)}, ${labelForMaintenance(data.maintenance)} et ${labelForLifestyle(data.lifestyle)}. Les 4 coupes proposees sont triees pour croiser la forme du visage avec vos selections.`;
 
 const createDemoAnalysis = (data: ConsultationData, faceShape = "visage ovale"): AnalysisResult => {
-  const canSuggestBeard = data.gender === "male" && data.ageGroup !== "baby" && data.ageGroup !== "child";
+  const canSuggestBeard = data.gender === "male" && data.ageGroup !== "baby" && data.ageGroup !== "child" && data.ageGroup !== "teen";
   const beard = canSuggestBeard ? "Rase de pres" : "Aucune";
 
   return {
@@ -1659,6 +1763,23 @@ const createDemoAnalysis = (data: ConsultationData, faceShape = "visage ovale"):
     detectedGender: data.gender,
     professionalAdvice: createPreferenceAdvice(data, faceShape),
     recommendedStyles: getPersonalizedStyles(faceShape, beard, data)
+  };
+};
+
+export const createLocalExampleAnalysis = (
+  data: ConsultationData,
+  faceShape: string,
+  hairTexture = "Texture moyenne",
+  skinTone = "Naturel",
+  sourceNote = "Profil charge depuis la base locale: la morphologie de depart est gardee, puis les recommandations se recalculent selon vos reglages."
+): AnalysisResult => {
+  const analysis = createDemoAnalysis(data, faceShape);
+  return {
+    ...analysis,
+    faceShape: `${faceShape} (exemple local)`,
+    hairTexture,
+    skinTone,
+    professionalAdvice: `${createPreferenceAdvice(data, faceShape)} ${sourceNote}`
   };
 };
 
@@ -1828,7 +1949,13 @@ export const generateHairstyleImage = async (
       return style?.previewUrl || createDemoPreviewImage(style);
     }
   }
-  if (!USE_GEMINI) return createDemoResultImage(originalBase64, style, angle);
+  if (!USE_GEMINI) {
+    try {
+      return await createLocalRetouchImage(originalBase64, style, angle);
+    } catch {
+      return createDemoResultImage(originalBase64, style, angle);
+    }
+  }
 
   return callWithRetry(async () => {
     const ai = new GoogleGenAI({ apiKey: API_KEY });
@@ -1903,10 +2030,18 @@ export const generateStyleAngles = async (originalBase64: string, proposal: any,
   }
 
   if (!USE_GEMINI) {
+    const createAngle = async (angle: 'left' | 'right' | 'back') => {
+      try {
+        return await createLocalRetouchImage(originalBase64, proposal, angle);
+      } catch {
+        return createDemoResultImage(originalBase64, proposal, angle);
+      }
+    };
+
     return {
-      left: createDemoResultImage(originalBase64, proposal, 'left'),
-      right: createDemoResultImage(originalBase64, proposal, 'right'),
-      back: createDemoResultImage(originalBase64, proposal, 'back')
+      left: await createAngle('left'),
+      right: await createAngle('right'),
+      back: await createAngle('back')
     };
   }
 

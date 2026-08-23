@@ -12,6 +12,9 @@ export default defineConfig(({ mode }) => {
   const imageToImageTimeoutMs = env.VITE_IMAGE_TO_IMAGE_TIMEOUT_MS || env.IMAGE_TO_IMAGE_TIMEOUT_MS || '180000';
   const freeImageToImageFallbacks = env.VITE_FREE_IMAGE_TO_IMAGE_FALLBACKS || env.FREE_IMAGE_TO_IMAGE_FALLBACKS || 'false';
   const freePreviewEndpoint = env.VITE_FREE_PREVIEW_ENDPOINT || env.FREE_PREVIEW_ENDPOINT || '/api/free-preview';
+  const alibabaUploadRecommendationsEndpoint = env.VITE_ALIBABA_UPLOAD_RECOMMENDATIONS_ENDPOINT || env.ALIBABA_UPLOAD_RECOMMENDATIONS_ENDPOINT || '/api/alibaba-upload-recommendations';
+  const openAiUploadRecommendationsEndpoint = env.VITE_OPENAI_UPLOAD_RECOMMENDATIONS_ENDPOINT || env.OPENAI_UPLOAD_RECOMMENDATIONS_ENDPOINT || '/api/openai-upload-recommendations';
+  const openAiSelectedResultEndpoint = env.VITE_OPENAI_SELECTED_RESULT_ENDPOINT || env.OPENAI_SELECTED_RESULT_ENDPOINT || '/api/openai-selected-result';
   const puterFluxModel = env.VITE_PUTER_FLUX_MODEL || env.PUTER_FLUX_MODEL || 'black-forest-labs/flux.1-kontext-pro';
   const hfKontextSpaceUrl = env.VITE_HF_KONTEXT_SPACE_URL || env.HF_KONTEXT_SPACE_URL || 'https://black-forest-labs-flux-1-kontext-dev.hf.space';
   const hfKontextSteps = env.VITE_HF_KONTEXT_STEPS || env.HF_KONTEXT_STEPS || '20';
@@ -32,6 +35,9 @@ export default defineConfig(({ mode }) => {
       'process.env.IMAGE_TO_IMAGE_TIMEOUT_MS': JSON.stringify(imageToImageTimeoutMs),
       'process.env.FREE_IMAGE_TO_IMAGE_FALLBACKS': JSON.stringify(freeImageToImageFallbacks),
       'process.env.FREE_PREVIEW_ENDPOINT': JSON.stringify(freePreviewEndpoint),
+      'process.env.ALIBABA_UPLOAD_RECOMMENDATIONS_ENDPOINT': JSON.stringify(alibabaUploadRecommendationsEndpoint),
+      'process.env.OPENAI_UPLOAD_RECOMMENDATIONS_ENDPOINT': JSON.stringify(openAiUploadRecommendationsEndpoint),
+      'process.env.OPENAI_SELECTED_RESULT_ENDPOINT': JSON.stringify(openAiSelectedResultEndpoint),
       'process.env.PUTER_FLUX_MODEL': JSON.stringify(puterFluxModel),
       'process.env.HF_KONTEXT_SPACE_URL': JSON.stringify(hfKontextSpaceUrl),
       'process.env.HF_KONTEXT_STEPS': JSON.stringify(hfKontextSteps),

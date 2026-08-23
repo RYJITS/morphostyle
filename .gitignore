@@ -70,6 +70,16 @@ runtime/outputs/
 
 # Orchestrateur - publication GitHub publique
 public/generated/videos/
+public/generated-alibaba/
+public/generated-openai/
+public/demo-profiles/*/combination-boards/
+public/demo-profiles/*/final-boards/
+public/demo-profiles/*/final-selections/
+public/demo-profiles/*/looks/
+public/demo-profiles/*/recommendation-boards/
+public/demo-profiles/*/recommendation-previews/*.png
+public/demo-profiles/*/final-views/*.png
+server/data/openai-daily-usage.json
 docs/daily-tests/evidence/
 *.zip
 *.7z

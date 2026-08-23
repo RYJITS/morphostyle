@@ -46,7 +46,12 @@ export interface StyleRecommendation {
   referenceCacheKey?: string;
   selected?: boolean;
   previewUrl?: string;
+  resultImageUrl?: string;
+  additionalViews?: AdditionalViews;
+  isPreparedAsset?: boolean;
   isPreviewLoading?: boolean;
+  sourceProvider?: 'openai-upload' | 'alibaba-upload' | 'static-demo';
+  generationSessionId?: string;
 }
 
 export interface AnalysisResult {
@@ -56,6 +61,13 @@ export interface AnalysisResult {
   professionalAdvice: string;
   detectedGender: 'male' | 'female' | 'non-binary';
   recommendedStyles: StyleRecommendation[];
+  generationSessionId?: string;
+  quota?: {
+    limit: number;
+    used: number;
+    remaining: number;
+    resetLabel: string;
+  };
 }
 
 export interface Proposal {
@@ -68,6 +80,7 @@ export interface Proposal {
   beardStyle: string;
   additionalViews?: AdditionalViews;
   isGeneratingAngles?: boolean;
+  isPreparedAsset?: boolean;
 }
 
 export enum AppState {

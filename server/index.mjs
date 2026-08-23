@@ -29,6 +29,12 @@ const DEFAULT_LOCAL_STABLEHAIR_SHORT_REFERENCE = path.join(rootDir, "server", "r
 const DEFAULT_LOCAL_LANDMARK_FACE_RESTORE_SCRIPT = path.join(rootDir, "server", "landmark-face-restore.py");
 const DEFAULT_LOCAL_REFERENCE_SANITIZE_SCRIPT = path.join(rootDir, "server", "sanitize-reference-preview.py");
 const REFERENCE_SANITIZE_VERSION = "grid-cell-v4";
+const GENERATED_ALIBABA_DIR = path.join(rootDir, "public", "generated-alibaba");
+const GENERATED_OPENAI_DIR = path.join(rootDir, "public", "generated-openai");
+const OPENAI_USAGE_DIR = path.join(rootDir, "server", "data");
+const OPENAI_USAGE_FILE = path.join(OPENAI_USAGE_DIR, "openai-daily-usage.json");
+const OPENAI_DAILY_TRIAL_LIMIT = Math.max(1, Number(process.env.OPENAI_DAILY_TRIAL_LIMIT || 1));
+const OPENAI_QUOTA_TIME_ZONE = process.env.OPENAI_QUOTA_TIME_ZONE || "Europe/Zurich";
 const DEFAULT_LOCAL_PYTHON_EXECUTABLE =
   "D:/00_Cerveau_IA/Conpetances/Video/ComfyUI/ComfyUI_windows_portable/python_embeded/python.exe";
 
@@ -255,6 +261,875 @@ const loadSharp = () => {
   } catch {
     return null;
   }
+};
+
+const consultationLabels = {
+  length: {
+    short: "court",
+    medium: "mi-long",
+    long: "long",
+    any: "libre adapte au visage"
+  },
+  maintenance: {
+    low: "entretien rapide",
+    medium: "entretien modere",
+    high: "rituel soigne"
+  },
+  lifestyle: {
+    classic: "classique",
+    modern: "moderne",
+    bold: "signature audacieux"
+  },
+  gender: {
+    male: "homme",
+    female: "femme",
+    "non-binary": "personne"
+  },
+  age: {
+    baby: "bebe",
+    child: "enfant",
+    teen: "adolescent",
+    adult: "adulte",
+    mature: "senior"
+  }
+};
+
+const openAiVariantPlans = {
+  primary: "proposition principale naturelle, tres portable, equilibre morphologique prioritaire",
+  soft: "proposition douce, mouvement naturel, volume leger, entretien realiste",
+  structured: "proposition structuree, lignes plus nettes, silhouette differente de la proposition douce",
+  signature: "proposition signature plus distinctive, toujours realiste et adaptee a l'age"
+};
+
+const openAiVariantLabels = {
+  primary: "Equilibre morphologie",
+  soft: "Doux naturel",
+  structured: "Structure nette",
+  signature: "Signature controlee"
+};
+
+const getOpenAiDailyTrialLimit = () =>
+  Math.max(1, Number(process.env.OPENAI_DAILY_TRIAL_LIMIT || OPENAI_DAILY_TRIAL_LIMIT || 1));
+
+const getOpenAiQuotaTimeZone = () => process.env.OPENAI_QUOTA_TIME_ZONE || OPENAI_QUOTA_TIME_ZONE;
+
+const getOpenAiQuotaDate = () =>
+  new Intl.DateTimeFormat("en-CA", {
+    timeZone: getOpenAiQuotaTimeZone(),
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  }).format(new Date());
+
+const getOpenAiQuotaResetLabel = () => `demain (${getOpenAiQuotaTimeZone()})`;
+
+const readOpenAiUsage = async () => {
+  const date = getOpenAiQuotaDate();
+  try {
+    const parsed = JSON.parse(await readFile(OPENAI_USAGE_FILE, "utf8"));
+    if (parsed?.date === date && parsed?.clients && typeof parsed.clients === "object") return parsed;
+  } catch {
+    // Missing or invalid quota file: start a clean day bucket.
+  }
+  return { date, clients: {} };
+};
+
+const writeOpenAiUsage = async (usage) => {
+  await mkdir(OPENAI_USAGE_DIR, { recursive: true });
+  await writeFile(OPENAI_USAGE_FILE, `${JSON.stringify(usage, null, 2)}\n`, "utf8");
+};
+
+const clientHashFromRequest = (req, payload = {}) => {
+  const clientId = String(payload.clientId || "").slice(0, 160);
+  const userAgent = String(req.headers["user-agent"] || "").slice(0, 240);
+  const ip = String(req.headers["x-forwarded-for"] || req.socket?.remoteAddress || "").split(",")[0].trim();
+  return createHash("sha256").update(`${clientId}|${userAgent}|${ip}`).digest("hex").slice(0, 32);
+};
+
+const sourceHashFromImage = (source) =>
+  createHash("sha256").update(source.data.slice(0, 16000)).digest("hex").slice(0, 32);
+
+const comboFromConsultation = (consultation = {}) => [
+  consultation.targetLength || "any",
+  consultation.maintenance || "medium",
+  consultation.lifestyle || "modern"
+].join("-");
+
+const reserveOpenAiDailyTrial = async ({ req, payload, sourceHash, combo }) => {
+  const usage = await readOpenAiUsage();
+  const clientKey = clientHashFromRequest(req, payload);
+  const limit = getOpenAiDailyTrialLimit();
+  const client = usage.clients[clientKey] || { used: 0, sessions: {} };
+
+  if ((client.used || 0) >= limit) {
+    throw Object.assign(new Error(`Votre essai OpenAI du jour est deja utilise. Revenez ${getOpenAiQuotaResetLabel()} ou utilisez un profil exemple.`), {
+      status: 429,
+      quota: {
+        limit,
+        used: client.used || 0,
+        remaining: 0,
+        resetLabel: getOpenAiQuotaResetLabel()
+      }
+    });
+  }
+
+  const sessionId = `${Date.now().toString(36)}-${createHash("sha1").update(`${clientKey}-${sourceHash}-${combo}`).digest("hex").slice(0, 10)}`;
+  client.used = (client.used || 0) + 1;
+  client.sessions = client.sessions || {};
+  client.sessions[sessionId] = {
+    sourceHash,
+    combo,
+    finalRemaining: true,
+    createdAt: new Date().toISOString()
+  };
+  usage.clients[clientKey] = client;
+  await writeOpenAiUsage(usage);
+
+  return {
+    sessionId,
+    quota: {
+      limit,
+      used: client.used,
+      remaining: Math.max(0, limit - client.used),
+      resetLabel: getOpenAiQuotaResetLabel()
+    }
+  };
+};
+
+const getOpenAiFinalSession = async ({ req, payload, sourceHash, combo }) => {
+  const usage = await readOpenAiUsage();
+  const clientKey = clientHashFromRequest(req, payload);
+  const sessionId = String(payload.generationSessionId || "").trim();
+  const client = usage.clients[clientKey];
+  const session = client?.sessions?.[sessionId];
+
+  if (!sessionId || !session) {
+    throw Object.assign(new Error("Session OpenAI introuvable. Relancez un essai demain ou choisissez un profil exemple."), { status: 403 });
+  }
+  if (!session.finalRemaining) {
+    throw Object.assign(new Error("Le resultat final de cet essai OpenAI a deja ete genere."), { status: 429 });
+  }
+  if (session.sourceHash !== sourceHash || session.combo !== combo) {
+    throw Object.assign(new Error("La photo ou les reglages ne correspondent plus a la session OpenAI initiale."), { status: 403 });
+  }
+
+  return { usage, clientKey, sessionId, session };
+};
+
+const markOpenAiFinalSessionUsed = async ({ usage, clientKey, sessionId }) => {
+  const session = usage.clients?.[clientKey]?.sessions?.[sessionId];
+  if (session) {
+    session.finalRemaining = false;
+    session.finalGeneratedAt = new Date().toISOString();
+    await writeOpenAiUsage(usage);
+  }
+};
+
+const alibabaVariantPlans = {
+  primary: "proposition principale naturelle, tres portable, equilibre morphologique prioritaire",
+  soft: "proposition douce, mouvement naturel, volume leger, entretien realiste",
+  structured: "proposition structuree, lignes plus nettes, silhouette differente de la proposition douce",
+  signature: "proposition signature plus distinctive, toujours realiste et adaptee a l'age"
+};
+
+const alibabaVariantLabels = {
+  primary: "Equilibre naturel",
+  soft: "Doux morphologie",
+  structured: "Structure nette",
+  signature: "Signature controlee"
+};
+
+const getAlibabaApiKey = () =>
+  process.env.Alibaba_API_KEY ||
+  process.env.ALIBABA_API_KEY ||
+  process.env.DASHSCOPE_API_KEY ||
+  "";
+
+const alibabaEndpointsFor = (asyncMode = false) => {
+  const suffix = asyncMode
+    ? "/api/v1/services/aigc/image-generation/generation"
+    : "/api/v1/services/aigc/multimodal-generation/generation";
+  const bases = [
+    process.env.Alibaba_API_ENDPOINT,
+    process.env.ALIBABA_API_ENDPOINT,
+    process.env.DASHSCOPE_ENDPOINT,
+    process.env.QWEN_IMAGE_ENDPOINT,
+    "https://dashscope-intl.aliyuncs.com",
+    "https://dashscope.aliyuncs.com"
+  ].filter(Boolean);
+
+  return [...new Set(bases.map((base) => base.endsWith("/generation") ? base : `${base.replace(/\/$/, "")}${suffix}`))];
+};
+
+const alibabaImageFromResponse = (json) => {
+  const choiceContent = json?.output?.choices?.[0]?.message?.content || [];
+  for (const item of choiceContent) {
+    if (item?.image) return item.image;
+    if (item?.image_url) return item.image_url;
+  }
+
+  const result = json?.output?.results?.[0];
+  if (result?.url) return result.url;
+  if (result?.image) return result.image;
+  if (result?.image_url) return result.image_url;
+
+  const data = json?.data?.[0];
+  if (data?.url) return data.url;
+  if (data?.b64_json) return `data:image/png;base64,${data.b64_json}`;
+
+  return "";
+};
+
+const alibabaErrorText = (payload) => {
+  if (!payload) return "empty response";
+  if (typeof payload === "string") return payload.slice(0, 800);
+  return JSON.stringify({
+    code: payload.code,
+    message: payload.message,
+    request_id: payload.request_id,
+    output: payload.output
+  }).slice(0, 1200);
+};
+
+const friendlyAlibabaError = (payload, fallbackStatus) => {
+  const code = typeof payload === "object" ? payload?.code : "";
+  if (code === "AllocationQuota.FreeTierOnly") {
+    return {
+      status: 429,
+      message: "Le quota gratuit Alibaba est epuise. Pour continuer, il faut attendre le renouvellement du quota, ajouter un moyen de paiement Alibaba Cloud, ou desactiver le mode \"free tier only\" dans la console Alibaba."
+    };
+  }
+  if (code === "InvalidApiKey") {
+    return {
+      status: 401,
+      message: "La cle Alibaba n'est pas acceptee par cet endpoint. Verifiez Alibaba_API_KEY et la region DashScope configuree."
+    };
+  }
+  if (fallbackStatus === 429) {
+    return {
+      status: 429,
+      message: "Alibaba refuse la generation pour une limite de quota ou de debit. Reessayez plus tard."
+    };
+  }
+  return {
+    status: fallbackStatus || 502,
+    message: `Alibaba API indisponible: ${alibabaErrorText(payload)}`
+  };
+};
+
+const postAlibabaJson = async (endpoint, apiKey, body, asyncMode = false) => {
+  const response = await fetch(endpoint, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${apiKey}`,
+      ...(asyncMode ? { "X-DashScope-Async": "enable" } : {})
+    },
+    body: JSON.stringify(body)
+  });
+  const text = await response.text();
+  let payload;
+  try {
+    payload = text ? JSON.parse(text) : {};
+  } catch {
+    payload = text;
+  }
+
+  if (!response.ok) {
+    const friendly = friendlyAlibabaError(payload, response.status);
+    const error = new Error(friendly.message);
+    error.status = friendly.status;
+    error.payload = payload;
+    error.providerMessage = alibabaErrorText(payload);
+    throw error;
+  }
+
+  return payload;
+};
+
+const pollAlibabaTask = async (endpoint, apiKey, taskId) => {
+  const base = endpoint.replace(/\/api\/v1\/services\/aigc\/.*$/, "");
+  const taskUrl = `${base}/api/v1/tasks/${taskId}`;
+  for (let attempt = 1; attempt <= 90; attempt += 1) {
+    await sleep(5000);
+    const response = await fetch(taskUrl, {
+      headers: { Authorization: `Bearer ${apiKey}` }
+    });
+    const json = await response.json().catch(() => ({}));
+    const status = json?.output?.task_status || json?.task_status;
+    if (status === "SUCCEEDED") return json;
+    if (["FAILED", "CANCELED", "UNKNOWN"].includes(status)) {
+      throw Object.assign(new Error(`Alibaba task ${status}: ${alibabaErrorText(json)}`), { status: 502 });
+    }
+  }
+  throw Object.assign(new Error("Timeout Alibaba pendant la generation."), { status: 504 });
+};
+
+const callAlibabaImage = async ({ body }) => {
+  const apiKey = getAlibabaApiKey();
+  if (isPlaceholderEnvValue(apiKey)) {
+    throw Object.assign(new Error("Alibaba_API_KEY manquante dans D:/00_Cerveau_IA/API/env.Local."), { status: 503 });
+  }
+
+  const errors = [];
+  for (const endpoint of alibabaEndpointsFor(false)) {
+    try {
+      return await postAlibabaJson(endpoint, apiKey, body, false);
+    } catch (error) {
+      errors.push(error);
+    }
+  }
+
+  for (const endpoint of alibabaEndpointsFor(true)) {
+    try {
+      const submitted = await postAlibabaJson(endpoint, apiKey, body, true);
+      const taskId = submitted?.output?.task_id || submitted?.task_id;
+      if (!taskId) throw Object.assign(new Error(`Alibaba API: aucun task_id retourne.`), { status: 502 });
+      return await pollAlibabaTask(endpoint, apiKey, taskId);
+    } catch (error) {
+      errors.push(error);
+    }
+  }
+
+  const firstQuota = errors.find((error) => error.status === 429);
+  if (firstQuota) throw firstQuota;
+  const last = errors[errors.length - 1];
+  throw Object.assign(new Error(last?.message || "Alibaba API indisponible."), { status: last?.status || 502 });
+};
+
+const downloadAlibabaImageBuffer = async (image) => {
+  if (image.startsWith("data:image/")) {
+    const [, base64] = image.split(",", 2);
+    return Buffer.from(base64, "base64");
+  }
+
+  const response = await fetch(image);
+  if (!response.ok) {
+    throw Object.assign(new Error(`Telechargement image Alibaba impossible: HTTP ${response.status}`), { status: 502 });
+  }
+  return Buffer.from(await response.arrayBuffer());
+};
+
+const buildAlibabaUploadPrompt = ({ consultation = {}, variant }) => {
+  const length = consultationLabels.length[consultation.targetLength] || "longueur adaptee";
+  const maintenance = consultationLabels.maintenance[consultation.maintenance] || "entretien adapte";
+  const lifestyle = consultationLabels.lifestyle[consultation.lifestyle] || "style adapte";
+  const gender = consultationLabels.gender[consultation.gender] || "personne";
+  const age = consultationLabels.age[consultation.ageGroup] || "adulte";
+  const isYoung = ["baby", "child", "teen"].includes(consultation.ageGroup);
+  const facialHairInstruction = consultation.gender === "male" && !isYoung
+    ? "If facial hair exists in the source, adapt beard/moustache grooming naturally to the selected hairstyle. Do not add facial hair if the source has none."
+    : "Do not add facial hair.";
+
+  return [
+    "Create one single high-resolution photorealistic studio contact sheet image, portrait orientation, 2 columns by 2 rows.",
+    "Use the uploaded image as identity reference. Preserve the same person, age, face structure, skin tone, expression and believable morphology.",
+    `User context: ${age} ${gender}. Exact selection: ${length}, ${maintenance}, univers ${lifestyle}.`,
+    `Variant to generate: ${variant} - ${alibabaVariantPlans[variant]}.`,
+    "The recommendation must be based on face morphology, not fashion alone. Respect the age group and avoid adult styling for children.",
+    facialHairInstruction,
+    "",
+    "Grid structure:",
+    "Top-left = front view portrait.",
+    "Top-right = true left-side profile photo: almost pure side profile, one ear fully visible, eye mostly in profile, lower shoulder visible.",
+    "Bottom-left = true right-side three-quarter profile photo: opposite direction but turned slightly back toward camera, one eye partly visible, different ear visibility, higher opposite shoulder, different hair fall.",
+    "Bottom-right = back view focused on haircut shape and neckline.",
+    "",
+    "Quality requirements:",
+    "Use the same haircut recommendation consistently in all four views.",
+    "Keep realistic skin texture, individual hair strands, natural studio light and clean neutral gray background.",
+    "Left and right profiles must not be mirrored duplicates. After horizontal flip they must still look different.",
+    "No text, no labels, no watermark, no logo, no outer white border.",
+    "Use thin internal light dividers only between cells so the 4 cells can be sliced cleanly.",
+    "Fill the full image with the grid, no margins around the outside."
+  ].join("\n");
+};
+
+const buildAlibabaRequestBody = ({ imageDataUrl, prompt }) => ({
+  model: process.env.ALIBABA_IMAGE_MODEL || process.env.QWEN_IMAGE_MODEL || "qwen-image-3.0",
+  input: {
+    messages: [
+      {
+        role: "user",
+        content: [
+          { image: imageDataUrl },
+          { text: prompt }
+        ]
+      }
+    ]
+  },
+  parameters: {
+    prompt_extend: true,
+    prompt_extend_mode: "direct",
+    enable_thinking: true,
+    n: 1,
+    size: process.env.ALIBABA_UPLOAD_SIZE || "1360*2040",
+    watermark: false,
+    negative_prompt: [
+      "cartoon",
+      "illustration",
+      "painting",
+      "plastic skin",
+      "beauty filter",
+      "changed identity",
+      "different person",
+      "text",
+      "label",
+      "logo",
+      "watermark",
+      "white outside border",
+      "mirrored left and right profiles",
+      "same side photo flipped",
+      "duplicate views",
+      "landscape sheet"
+    ].join(", ")
+  }
+});
+
+const cropAlibabaVariantViews = async ({ sheetBuffer, sessionId, combo, variant }) => {
+  const sharp = loadSharp();
+  if (!sharp) {
+    throw Object.assign(new Error("Sharp indisponible pour decouper la planche Alibaba."), { status: 503 });
+  }
+
+  const metadata = await sharp(sheetBuffer).metadata();
+  const width = metadata.width || 1360;
+  const height = metadata.height || 2040;
+  const midX = Math.round(width / 2);
+  const midY = Math.round(height / 2);
+  const inset = Math.max(6, Math.round(Math.min(width, height) * 0.006));
+  const views = {
+    front: { left: inset, top: inset, width: midX - inset * 2, height: midY - inset * 2 },
+    left: { left: midX + inset, top: inset, width: width - midX - inset * 2, height: midY - inset * 2 },
+    right: { left: inset, top: midY + inset, width: midX - inset * 2, height: height - midY - inset * 2 },
+    back: { left: midX + inset, top: midY + inset, width: width - midX - inset * 2, height: height - midY - inset * 2 }
+  };
+
+  const outDir = path.join(GENERATED_ALIBABA_DIR, sessionId);
+  await mkdir(outDir, { recursive: true });
+  await writeFile(path.join(outDir, `${combo}-${variant}-sheet.png`), sheetBuffer);
+
+  const urls = {};
+  for (const [view, box] of Object.entries(views)) {
+    const buffer = await sharp(sheetBuffer)
+      .extract(box)
+      .resize(768, 1152, { fit: "cover", position: "center" })
+      .jpeg({ quality: 92, mozjpeg: true })
+      .toBuffer();
+    const filename = `${combo}-${variant}-${view}.jpg`;
+    await writeFile(path.join(outDir, filename), buffer);
+    urls[view] = `/generated-alibaba/${sessionId}/${filename}`;
+  }
+
+  return urls;
+};
+
+const buildAlibabaStyle = ({ consultation, variant, urls }) => {
+  const length = consultationLabels.length[consultation.targetLength] || "adapte";
+  const lifestyle = consultationLabels.lifestyle[consultation.lifestyle] || "personnalise";
+  const maintenance = consultationLabels.maintenance[consultation.maintenance] || "entretien adapte";
+  const canBeard = consultation.gender === "male" && !["baby", "child", "teen"].includes(consultation.ageGroup);
+
+  return {
+    id: `alibaba-upload-${consultation.targetLength}-${consultation.maintenance}-${consultation.lifestyle}-${variant}`,
+    name: `${lengthLabelsFr(consultation.targetLength)} ${lifestyle} ${alibabaVariantLabels[variant]}`,
+    description: `Planche Alibaba haute qualite 2x2, ${length}, ${maintenance}, univers ${lifestyle}.`,
+    color: consultation.gender === "female" ? "Naturel lumineux" : "Naturel",
+    beardStyle: canBeard ? "Toilettage barbe adapte" : "Aucune",
+    whyItWorks: `Proposition basee sur la morphologie visible de la photo chargee, avec ${length}, ${maintenance} et univers ${lifestyle}.`,
+    faceShape: "morphologie personnalisee",
+    previewUrl: urls.front,
+    resultImageUrl: urls.front,
+    additionalViews: {
+      left: urls.left,
+      right: urls.right,
+      back: urls.back
+    },
+    isPreparedAsset: true
+  };
+};
+
+const lengthLabelsFr = (length) => ({
+  short: "Court",
+  medium: "Mi-long",
+  long: "Long",
+  any: "Libre"
+}[length] || "Style");
+
+const generateAlibabaUploadRecommendations = async (payload) => {
+  const source = imageDataUrlFromPayload(payload);
+  const consultation = payload.consultation || {};
+  const combo = [
+    consultation.targetLength || "any",
+    consultation.maintenance || "medium",
+    consultation.lifestyle || "modern"
+  ].join("-");
+  const sessionId = `${Date.now().toString(36)}-${createHash("sha1").update(source.data.slice(0, 4000)).digest("hex").slice(0, 10)}`;
+  const variants = ["primary", "soft", "structured", "signature"];
+  const styles = [];
+  let warning = "";
+
+  for (const variant of variants) {
+    try {
+      const prompt = buildAlibabaUploadPrompt({ consultation, variant });
+      const body = buildAlibabaRequestBody({ imageDataUrl: source.dataUrl, prompt });
+      const result = await callAlibabaImage({ body });
+      const generatedImage = alibabaImageFromResponse(result);
+      if (!generatedImage) throw Object.assign(new Error("Alibaba n'a pas retourne d'image."), { status: 502 });
+      const sheetBuffer = await downloadAlibabaImageBuffer(generatedImage);
+      const urls = await cropAlibabaVariantViews({ sheetBuffer, sessionId, combo, variant });
+      styles.push(buildAlibabaStyle({ consultation, variant, urls }));
+    } catch (error) {
+      warning = error.message || "Generation Alibaba interrompue.";
+      if (!styles.length) throw error;
+      break;
+    }
+  }
+
+  return {
+    faceShape: "morphologie personnalisee",
+    hairTexture: "Texture detectee depuis la photo chargee",
+    skinTone: "Teint preserve depuis la photo chargee",
+    detectedGender: consultation.gender || "non-binary",
+    professionalAdvice: [
+      `Photo chargee traitee avec la methode Alibaba haute qualite 2x2.`,
+      `Selection: ${consultationLabels.length[consultation.targetLength] || "longueur adaptee"}, ${consultationLabels.maintenance[consultation.maintenance] || "entretien adapte"}, univers ${consultationLabels.lifestyle[consultation.lifestyle] || "style adapte"}.`,
+      warning ? `Generation partielle: ${warning}` : "Les 4 propositions ont ete generees puis decoupees localement."
+    ].join(" "),
+    recommendedStyles: styles,
+    partial: Boolean(warning)
+  };
+};
+
+const getOpenAiApiKey = () =>
+  process.env.OPENAI_API_KEY ||
+  process.env.OpenAI_API_KEY ||
+  "";
+
+const openAiErrorText = (payload) => {
+  if (!payload) return "empty response";
+  if (typeof payload === "string") return payload.slice(0, 800);
+  return JSON.stringify({
+    error: payload.error,
+    status: payload.status,
+    message: payload.message
+  }).slice(0, 1200);
+};
+
+const friendlyOpenAiError = (payload, fallbackStatus) => {
+  const code = payload?.error?.code || payload?.code || "";
+  const type = payload?.error?.type || "";
+  if (fallbackStatus === 401 || code === "invalid_api_key") {
+    return {
+      status: 401,
+      message: "La cle OpenAI n'est pas acceptee. Verifiez OPENAI_API_KEY cote serveur."
+    };
+  }
+  if (fallbackStatus === 429 || /quota|rate/i.test(`${code} ${type}`)) {
+    return {
+      status: 429,
+      message: "OpenAI refuse la generation pour une limite de quota ou de debit. Reessayez plus tard."
+    };
+  }
+  return {
+    status: fallbackStatus || 502,
+    message: `OpenAI Image indisponible: ${openAiErrorText(payload)}`
+  };
+};
+
+const imageExtensionForMime = (mimeType = "") =>
+  mimeType.includes("png") ? "png" : mimeType.includes("webp") ? "webp" : "jpg";
+
+const buildOpenAiImageForm = ({ source, prompt, size }) => {
+  const model = process.env.OPENAI_IMAGE_MODEL || "gpt-image-2";
+  const quality = process.env.OPENAI_IMAGE_QUALITY || "medium";
+  const outputFormat = process.env.OPENAI_IMAGE_OUTPUT_FORMAT || "png";
+  const form = new FormData();
+  const imageBuffer = Buffer.from(source.data, "base64");
+  const extension = imageExtensionForMime(source.mimeType);
+
+  form.append("model", model);
+  form.append("image", new Blob([imageBuffer], { type: source.mimeType }), `source.${extension}`);
+  form.append("prompt", prompt);
+  form.append("size", size);
+  form.append("n", "1");
+  form.append("quality", quality);
+  form.append("output_format", outputFormat);
+
+  return form;
+};
+
+const callOpenAiImageEdit = async ({ source, prompt, size }) => {
+  const apiKey = getOpenAiApiKey();
+  if (isPlaceholderEnvValue(apiKey)) {
+    throw Object.assign(new Error("OPENAI_API_KEY manquante cote serveur."), { status: 503 });
+  }
+
+  const response = await fetch("https://api.openai.com/v1/images/edits", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`
+    },
+    body: buildOpenAiImageForm({ source, prompt, size })
+  });
+
+  const text = await response.text();
+  let payload;
+  try {
+    payload = text ? JSON.parse(text) : {};
+  } catch {
+    payload = text;
+  }
+
+  if (!response.ok) {
+    const friendly = friendlyOpenAiError(payload, response.status);
+    const error = new Error(friendly.message);
+    error.status = friendly.status;
+    error.payload = payload;
+    throw error;
+  }
+
+  return payload;
+};
+
+const openAiImageFromResponse = (json) => {
+  const data = json?.data?.[0];
+  if (data?.b64_json) return `data:image/png;base64,${data.b64_json}`;
+  if (data?.url) return data.url;
+  if (data?.image) return data.image;
+  return "";
+};
+
+const downloadOpenAiImageBuffer = async (image) => {
+  if (image.startsWith("data:image/")) {
+    const [, base64] = image.split(",", 2);
+    return Buffer.from(base64, "base64");
+  }
+
+  const response = await fetch(image);
+  if (!response.ok) {
+    throw Object.assign(new Error(`Telechargement image OpenAI impossible: HTTP ${response.status}`), { status: 502 });
+  }
+  return Buffer.from(await response.arrayBuffer());
+};
+
+const buildOpenAiRecommendationPrompt = ({ consultation = {} }) => {
+  const length = consultationLabels.length[consultation.targetLength] || "longueur adaptee";
+  const maintenance = consultationLabels.maintenance[consultation.maintenance] || "entretien adapte";
+  const lifestyle = consultationLabels.lifestyle[consultation.lifestyle] || "style adapte";
+  const gender = consultationLabels.gender[consultation.gender] || "personne";
+  const age = consultationLabels.age[consultation.ageGroup] || "adulte";
+  const isYoung = ["baby", "child", "teen"].includes(consultation.ageGroup);
+  const facialHairInstruction = consultation.gender === "male" && !isYoung
+    ? "If facial hair exists in the source, adapt beard/moustache grooming naturally. Do not add facial hair if the source has none."
+    : "Do not add facial hair.";
+
+  return [
+    "Create one single high-resolution photorealistic salon contact sheet image in portrait orientation, exactly 4 columns by 4 rows.",
+    "Use the uploaded portrait as identity reference. Preserve the same person, age, face structure, skin tone, expression and believable morphology.",
+    `User context: ${age} ${gender}. Exact selection: ${length}, ${maintenance}, univers ${lifestyle}.`,
+    "The four columns are four clearly different haircut recommendations based on face morphology and the selected criteria.",
+    "Column 1 = natural balanced option. Column 2 = softer option. Column 3 = more structured option. Column 4 = signature but realistic option.",
+    "Rows: row 1 front identity-photo style portrait, row 2 true left profile, row 3 true right profile that is not a mirror duplicate, row 4 back view focused on haircut shape.",
+    "Every cell must be portrait identity-photo framing, centered head and shoulders, neutral gray studio background.",
+    "Respect the age group; never use adult styling on children.",
+    facialHairInstruction,
+    "No text, no labels, no watermark, no logo, no outer white border.",
+    "Use only thin internal dividers and fill the entire image with the grid."
+  ].join("\n");
+};
+
+const buildOpenAiFinalPrompt = ({ consultation = {}, style = {} }) => {
+  const length = consultationLabels.length[consultation.targetLength] || "longueur adaptee";
+  const maintenance = consultationLabels.maintenance[consultation.maintenance] || "entretien adapte";
+  const lifestyle = consultationLabels.lifestyle[consultation.lifestyle] || "style adapte";
+  const gender = consultationLabels.gender[consultation.gender] || "personne";
+  const age = consultationLabels.age[consultation.ageGroup] || "adulte";
+  const normalizedStyle = normalizeStyle(style);
+  const isYoung = ["baby", "child", "teen"].includes(consultation.ageGroup);
+  const facialHairInstruction = normalizedStyle.beardStyle && !/aucune|n\/a|none/i.test(normalizedStyle.beardStyle) && !isYoung
+    ? `Adapt facial hair naturally only if it already exists. Target facial hair: ${normalizedStyle.beardStyle}.`
+    : "Do not add facial hair.";
+
+  return [
+    "Create one single high-resolution photorealistic salon result sheet image in portrait orientation, exactly 2 columns by 2 rows.",
+    "Use the uploaded portrait as identity reference. Preserve the same person, age, face structure, skin tone, expression and believable morphology.",
+    `Selected haircut: ${normalizedStyle.name}.`,
+    `Hair description: ${normalizedStyle.description}. Hair color: ${normalizedStyle.color}.`,
+    `User context: ${age} ${gender}. Exact selection: ${length}, ${maintenance}, univers ${lifestyle}.`,
+    normalizedStyle.whyItWorks ? `Morphology objective: ${normalizedStyle.whyItWorks}.` : "",
+    facialHairInstruction,
+    "Grid structure: top-left front view, top-right true left profile, bottom-left true right profile not mirrored, bottom-right back view.",
+    "All four views must show the same selected haircut consistently.",
+    "Every cell must be portrait identity-photo framing, centered head and shoulders, neutral gray studio background.",
+    "Keep realistic skin texture, individual hair strands and natural studio light.",
+    "No text, no labels, no watermark, no logo, no outer white border.",
+    "Use only thin internal dividers and fill the entire image with the grid."
+  ].filter(Boolean).join("\n");
+};
+
+const cropOpenAiRecommendationPreviews = async ({ sheetBuffer, sessionId, combo }) => {
+  const sharp = loadSharp();
+  if (!sharp) {
+    throw Object.assign(new Error("Sharp indisponible pour decouper la planche OpenAI."), { status: 503 });
+  }
+
+  const metadata = await sharp(sheetBuffer).metadata();
+  const width = metadata.width || 1024;
+  const height = metadata.height || 1536;
+  const cellW = Math.floor(width / 4);
+  const cellH = Math.floor(height / 4);
+  const inset = Math.max(4, Math.round(Math.min(width, height) * 0.004));
+  const outDir = path.join(GENERATED_OPENAI_DIR, sessionId);
+  await mkdir(outDir, { recursive: true });
+  await writeFile(path.join(outDir, `${combo}-recommendations-sheet.png`), sheetBuffer);
+
+  const urls = {};
+  for (const [index, variant] of Object.keys(openAiVariantPlans).entries()) {
+    const left = index * cellW + inset;
+    const top = inset;
+    const cropWidth = (index === 3 ? width - index * cellW : cellW) - inset * 2;
+    const cropHeight = cellH - inset * 2;
+    const buffer = await sharp(sheetBuffer)
+      .extract({ left, top, width: cropWidth, height: cropHeight })
+      .resize(768, 1152, { fit: "cover", position: "center" })
+      .jpeg({ quality: 92, mozjpeg: true })
+      .toBuffer();
+    const filename = `${combo}-recommendation-${variant}.jpg`;
+    await writeFile(path.join(outDir, filename), buffer);
+    urls[variant] = `/generated-openai/${sessionId}/${filename}`;
+  }
+
+  return urls;
+};
+
+const cropOpenAiFinalViews = async ({ sheetBuffer, sessionId, combo, styleId }) => {
+  const sharp = loadSharp();
+  if (!sharp) {
+    throw Object.assign(new Error("Sharp indisponible pour decouper la planche OpenAI."), { status: 503 });
+  }
+
+  const metadata = await sharp(sheetBuffer).metadata();
+  const width = metadata.width || 1024;
+  const height = metadata.height || 1536;
+  const midX = Math.round(width / 2);
+  const midY = Math.round(height / 2);
+  const inset = Math.max(6, Math.round(Math.min(width, height) * 0.006));
+  const views = {
+    front: { left: inset, top: inset, width: midX - inset * 2, height: midY - inset * 2 },
+    left: { left: midX + inset, top: inset, width: width - midX - inset * 2, height: midY - inset * 2 },
+    right: { left: inset, top: midY + inset, width: midX - inset * 2, height: height - midY - inset * 2 },
+    back: { left: midX + inset, top: midY + inset, width: width - midX - inset * 2, height: height - midY - inset * 2 }
+  };
+  const outDir = path.join(GENERATED_OPENAI_DIR, sessionId);
+  await mkdir(outDir, { recursive: true });
+  await writeFile(path.join(outDir, `${combo}-${styleId}-final-sheet.png`), sheetBuffer);
+
+  const urls = {};
+  for (const [view, box] of Object.entries(views)) {
+    const buffer = await sharp(sheetBuffer)
+      .extract(box)
+      .resize(768, 1152, { fit: "cover", position: "center" })
+      .jpeg({ quality: 92, mozjpeg: true })
+      .toBuffer();
+    const filename = `${combo}-${styleId}-${view}.jpg`;
+    await writeFile(path.join(outDir, filename), buffer);
+    urls[view] = `/generated-openai/${sessionId}/${filename}`;
+  }
+
+  return urls;
+};
+
+const buildOpenAiStyle = ({ consultation, variant, previewUrl, sessionId }) => {
+  const length = consultationLabels.length[consultation.targetLength] || "adapte";
+  const lifestyle = consultationLabels.lifestyle[consultation.lifestyle] || "personnalise";
+  const maintenance = consultationLabels.maintenance[consultation.maintenance] || "entretien adapte";
+  const canBeard = consultation.gender === "male" && !["baby", "child", "teen"].includes(consultation.ageGroup);
+
+  return {
+    id: `openai-upload-${consultation.targetLength}-${consultation.maintenance}-${consultation.lifestyle}-${variant}`,
+    name: `${lengthLabelsFr(consultation.targetLength)} ${lifestyle} ${openAiVariantLabels[variant]}`,
+    description: `Proposition OpenAI issue de la planche 4x4: ${length}, ${maintenance}, univers ${lifestyle}.`,
+    color: consultation.gender === "female" ? "Naturel lumineux" : "Naturel",
+    beardStyle: canBeard ? "Toilettage barbe adapte" : "Aucune",
+    whyItWorks: `Proposition basee sur la morphologie visible de la photo chargee, avec ${length}, ${maintenance} et univers ${lifestyle}.`,
+    faceShape: "morphologie personnalisee",
+    previewUrl,
+    sourceProvider: "openai-upload",
+    generationSessionId: sessionId
+  };
+};
+
+const safeStyleId = (style = {}) =>
+  String(style.id || "style").replace(/[^a-z0-9_-]+/gi, "-").replace(/^-+|-+$/g, "").slice(0, 80) || "style";
+
+const generateOpenAiUploadRecommendations = async (req, payload) => {
+  const source = imageDataUrlFromPayload(payload);
+  const consultation = payload.consultation || {};
+  const combo = comboFromConsultation(consultation);
+  const sourceHash = sourceHashFromImage(source);
+  const { sessionId, quota } = await reserveOpenAiDailyTrial({ req, payload, sourceHash, combo });
+  const prompt = buildOpenAiRecommendationPrompt({ consultation });
+  const size = process.env.OPENAI_RECOMMENDATION_SIZE || process.env.OPENAI_IMAGE_SIZE || "1024x1536";
+  const result = await callOpenAiImageEdit({ source, prompt, size });
+  const generatedImage = openAiImageFromResponse(result);
+  if (!generatedImage) throw Object.assign(new Error(`OpenAI n'a pas retourne d'image: ${openAiErrorText(result)}`), { status: 502 });
+
+  const sheetBuffer = await downloadOpenAiImageBuffer(generatedImage);
+  const previewUrls = await cropOpenAiRecommendationPreviews({ sheetBuffer, sessionId, combo });
+  const styles = Object.keys(openAiVariantPlans).map((variant) =>
+    buildOpenAiStyle({ consultation, variant, previewUrl: previewUrls[variant], sessionId })
+  );
+
+  return {
+    faceShape: "morphologie personnalisee",
+    hairTexture: "Texture detectee depuis la photo chargee",
+    skinTone: "Teint preserve depuis la photo chargee",
+    detectedGender: consultation.gender || "non-binary",
+    professionalAdvice: [
+      "Photo personnelle traitee avec OpenAI Image.",
+      `Selection: ${consultationLabels.length[consultation.targetLength] || "longueur adaptee"}, ${consultationLabels.maintenance[consultation.maintenance] || "entretien adapte"}, univers ${consultationLabels.lifestyle[consultation.lifestyle] || "style adapte"}.`,
+      "Les 4 propositions viennent d'une seule planche 4x4. La coupe choisie generera ensuite une planche finale incluse dans l'essai du jour."
+    ].join(" "),
+    recommendedStyles: styles,
+    generationSessionId: sessionId,
+    quota
+  };
+};
+
+const generateOpenAiSelectedResult = async (req, payload) => {
+  const source = imageDataUrlFromPayload(payload);
+  const consultation = payload.consultation || {};
+  const style = normalizeStyle(payload.style || {});
+  const combo = comboFromConsultation(consultation);
+  const sourceHash = sourceHashFromImage(source);
+  const session = await getOpenAiFinalSession({ req, payload, sourceHash, combo });
+  const prompt = buildOpenAiFinalPrompt({ consultation, style });
+  const size = process.env.OPENAI_FINAL_SIZE || process.env.OPENAI_IMAGE_SIZE || "1024x1536";
+  const result = await callOpenAiImageEdit({ source, prompt, size });
+  const generatedImage = openAiImageFromResponse(result);
+  if (!generatedImage) throw Object.assign(new Error(`OpenAI n'a pas retourne d'image: ${openAiErrorText(result)}`), { status: 502 });
+
+  const sheetBuffer = await downloadOpenAiImageBuffer(generatedImage);
+  const styleId = safeStyleId(style);
+  const urls = await cropOpenAiFinalViews({ sheetBuffer, sessionId: session.sessionId, combo, styleId });
+  await markOpenAiFinalSessionUsed(session);
+
+  return {
+    id: `openai-final-${styleId}`,
+    imageUrl: urls.front,
+    styleName: style.name,
+    description: style.description,
+    whyItWorks: `${style.whyItWorks || "Resultat final base sur la morphologie et les reglages choisis."} Planche finale generee avec OpenAI puis decoupee localement.`,
+    color: style.color,
+    beardStyle: style.beardStyle,
+    additionalViews: {
+      left: urls.left,
+      right: urls.right,
+      back: urls.back
+    },
+    isPreparedAsset: true
+  };
 };
 
 const getLocalComfyApi = () => process.env.LOCAL_COMFY_API || process.env.COMFY_API_URL || DEFAULT_LOCAL_COMFY_API;
@@ -2039,6 +2914,10 @@ const handleApi = async (req, res) => {
     const apiKey = process.env.GEMINI_API_KEY || process.env.API_KEY || "";
     const hasKey = !isPlaceholderEnvValue(apiKey);
     const provider = getServerImageProvider() || "gemini";
+    const alibabaKey = getAlibabaApiKey();
+    const hasAlibabaKey = !isPlaceholderEnvValue(alibabaKey);
+    const openAiKey = getOpenAiApiKey();
+    const hasOpenAiKey = !isPlaceholderEnvValue(openAiKey);
     const localComfyAvailable = await pingLocalComfy();
     const localStableHairAvailable =
       isLocalStableHairEnabled() &&
@@ -2049,6 +2928,11 @@ const handleApi = async (req, res) => {
       ok: true,
       provider,
       hasGeminiKey: hasKey,
+      hasAlibabaKey,
+      alibabaUploadRecommendations: hasAlibabaKey,
+      hasOpenAiKey,
+      openAiUploadRecommendations: hasOpenAiKey,
+      openAiDailyTrialLimit: getOpenAiDailyTrialLimit(),
       falEnabled: false,
       freeFallbacks: provider === "free-chain" || provider === "ai-horde",
       localComfyAvailable,
@@ -2106,7 +2990,111 @@ const handleApi = async (req, res) => {
     return true;
   }
 
+  if (req.method === "POST" && req.url === "/api/alibaba-upload-recommendations") {
+    try {
+      const payload = await readJsonBody(req);
+      const result = await generateAlibabaUploadRecommendations(payload);
+      sendJson(res, 200, { ok: true, ...result });
+    } catch (error) {
+      const status = error.status || (error.message === "IMAGE_TOO_LARGE" ? 413 : 500);
+      sendJson(res, status, {
+        ok: false,
+        error: error.message || "Generation Alibaba impossible."
+      });
+    }
+    return true;
+  }
+
+  if (req.method === "POST" && req.url === "/api/openai-upload-recommendations") {
+    try {
+      const payload = await readJsonBody(req);
+      const result = await generateOpenAiUploadRecommendations(req, payload);
+      sendJson(res, 200, { ok: true, ...result });
+    } catch (error) {
+      const status = error.status || (error.message === "IMAGE_TOO_LARGE" ? 413 : 500);
+      sendJson(res, status, {
+        ok: false,
+        error: error.message || "Generation OpenAI impossible.",
+        quota: error.quota
+      });
+    }
+    return true;
+  }
+
+  if (req.method === "POST" && req.url === "/api/openai-selected-result") {
+    try {
+      const payload = await readJsonBody(req);
+      const proposal = await generateOpenAiSelectedResult(req, payload);
+      sendJson(res, 200, { ok: true, proposal });
+    } catch (error) {
+      const status = error.status || (error.message === "IMAGE_TOO_LARGE" ? 413 : 500);
+      sendJson(res, status, {
+        ok: false,
+        error: error.message || "Resultat OpenAI impossible."
+      });
+    }
+    return true;
+  }
+
   return false;
+};
+
+const serveGeneratedAlibabaAsset = async (req, res) => {
+  const parsedUrl = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
+  const requestedPath = decodeURIComponent(parsedUrl.pathname);
+  if (!requestedPath.startsWith("/generated-alibaba/")) return false;
+
+  const relativePath = requestedPath.replace(/^\/generated-alibaba\//, "");
+  const safePath = path.normalize(relativePath).replace(/^(\.\.[/\\])+/, "");
+  const filePath = path.join(GENERATED_ALIBABA_DIR, safePath);
+
+  if (!filePath.startsWith(GENERATED_ALIBABA_DIR)) {
+    res.writeHead(403);
+    res.end("Forbidden");
+    return true;
+  }
+
+  try {
+    const data = await readFile(filePath);
+    res.writeHead(200, {
+      "Content-Type": mimeByExt.get(path.extname(filePath)) || "application/octet-stream",
+      "Cache-Control": "public, max-age=31536000, immutable"
+    });
+    res.end(data);
+  } catch {
+    sendJson(res, 404, { ok: false, error: "Image generee introuvable." });
+  }
+
+  return true;
+};
+
+const serveGeneratedOpenAiAsset = async (req, res) => {
+  const parsedUrl = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
+  const requestedPath = decodeURIComponent(parsedUrl.pathname);
+  if (!requestedPath.startsWith("/generated-openai/")) return false;
+
+  const relativePath = requestedPath.replace(/^\/generated-openai\//, "");
+  const safePath = path.normalize(relativePath).replace(/^(\.\.[/\\])+/, "");
+  const filePath = path.join(GENERATED_OPENAI_DIR, safePath);
+
+  if (!filePath.startsWith(GENERATED_OPENAI_DIR)) {
+    res.writeHead(403);
+    res.end("Forbidden");
+    return true;
+  }
+
+  try {
+    const data = await readFile(filePath);
+    res.writeHead(200, {
+      "Content-Type": mimeByExt.get(path.extname(filePath)) || "application/octet-stream",
+      "Cache-Control": "public, max-age=31536000, immutable"
+    });
+    res.end(data);
+  } catch {
+    sendJson(res, 404, { ok: false, error: "Image OpenAI generee introuvable." });
+  }
+
+  return true;
 };
 
 const serveStatic = async (req, res) => {
@@ -2150,6 +3138,8 @@ createServer(async (req, res) => {
 
   if (await handleApi(req, res)) return;
   if (req.method === "GET" || req.method === "HEAD") {
+    if (await serveGeneratedAlibabaAsset(req, res)) return;
+    if (await serveGeneratedOpenAiAsset(req, res)) return;
     await serveStatic(req, res);
     return;
   }

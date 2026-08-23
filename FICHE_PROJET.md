@@ -5,13 +5,13 @@
 - GitHub: [https://github.com/RYJITS/morphostyle](https://github.com/RYJITS/morphostyle)
 
 ## A quoi sert le projet
-MorphoStyle AI est une application web qui permet aux utilisateurs de recevoir des conseils personnalisés en coiffure et style grâce à l'analyse morphologique automatisée de leur visage. L'application combine une interface intuitive avec des modèles d'IA spécialisés pour générer des aperçus réalistes de styles adaptés, tout en conservant les caractéristiques uniques de chaque utilisateur. Elle s'adresse aussi bien aux particuliers qu'aux professionnels souhaitant visualiser rapidement des propositions créatives.
+MorphoStyle AI est une application web qui permet de tester une consultation coiffure/visagisme. Elle combine cinq profils demo prepares en base statique et un parcours photo personnelle utilisant OpenAI Image cote serveur. L'objectif est de montrer des recommandations morphologiques realistes sans multiplier les appels API inutiles.
 
 ## Fonctionnement de l'application ou du projet
-L'application suit un workflow en cinq étapes : 1) L'utilisateur charge une photo de son visage et remplit un formulaire de profil (âge, type de visage, préférences). 2) L'IA analyse la morphologie du visage via un schéma JSON strict et génère des recommandations de styles adaptés. 3) L'utilisateur sélectionne jusqu'à quatre styles parmi les propositions générées. 4) L'IA génère des aperçus réalistes en conservant l'identité, la lumière, les vêtements et le contexte de la photo originale. 5) L'utilisateur peut demander des angles supplémentaires (profil gauche/droit, dos) pour une visualisation complète. Le système gère automatiquement les erreurs et les retries en cas de saturation du service.
+L'application suit deux parcours. Les profils demo chargent des planches statiques deja preparees et decoupees localement. Pour une photo personnelle, l'utilisateur charge son portrait, choisit ses reglages, puis OpenAI genere une premiere planche 4x4 avec quatre propositions. L'utilisateur selectionne une proposition et une seconde planche finale est generee puis decoupee en face, profil gauche, profil droit et dos. Le serveur applique une limite d'un essai complet OpenAI par jour et conserve uniquement des empreintes de session pour le quota.
 
 ## Comment le projet a ete construit
-Le projet a été conçu comme un assistant de consultation en coiffure, combinant analyse structuree, recommandations lisibles et génération d'images réalistes. Les choix clés incluent : l'utilisation d'un schéma JSON strict pour l'analyse morphologique afin d'assurer la précision des recommandations, des prompts optimisés pour conserver l'identité et le contexte de la photo dans les aperçus générés, une gestion automatique des retries avec délai exponentiel pour améliorer la robustesse, et une interface utilisateur intuitive pour faciliter l'expérience. L'architecture modulaire sépare clairement le frontend (React avec Vite) du backend (Node.js), avec une gestion centralisée des erreurs et des validations. Le responsive design permet une utilisation optimale sur mobile et desktop.
+Le projet a ete reconstruit autour d'une logique economique et controlable: les exemples restent statiques, les images personnelles utilisent deux appels OpenAI maximum par essai, et le serveur garde les cles API hors du navigateur. Les planches sont decoupees avec Sharp pour afficher des portraits independants et agrandissables. L'interface React garde un parcours simple: selection d'un profil ou upload, reglages, choix d'une proposition, resultat final avec vues complementaires.
 
 ## Installation et utilisation
 ### Installation
@@ -21,32 +21,33 @@ Le projet a été conçu comme un assistant de consultation en coiffure, combina
 Après installation, l'utilisateur accède à l'application via un navigateur web. Il commence par charger une photo de son visage, puis remplit un formulaire de profil (âge, type de visage, préférences). L'application analyse automatiquement la morphologie et propose des styles adaptés. L'utilisateur sélectionne jusqu'à quatre styles, puis l'IA génère des aperçus réalistes en conservant ses caractéristiques uniques. Il peut ensuite demander des angles supplémentaires (profil gauche/droit, dos) pour une visualisation complète. Le système gère automatiquement les erreurs et les retries en cas de saturation du service.
 
 ## Fonctions disponibles dans l'application
-- Analyse morphologique automatique du visage à partir d'une photo
-- Génération de recommandations de styles de coiffure ou barbe adaptés
-- Création d'aperçus réalistes en conservant l'identité, la lumière et le contexte
-- Génération d'angles supplémentaires (face, profil gauche/droit, dos)
-- Conservation automatique des vêtements, du fond et de l'éclairage
-- Gestion des erreurs et retries automatiques avec délai exponentiel
-- Validation automatique des âges pour éviter les suggestions inappropriées
-- Interface responsive adaptée aux mobiles et desktop
+- Selection de profils demo statiques
+- Upload d'une photo personnelle
+- Generation OpenAI d'une planche 4x4 de recommandations
+- Generation OpenAI d'une planche finale pour la coupe selectionnee
+- Quota serveur: un essai complet photo personnelle par jour
+- Decoupage local des planches en portraits face, profils et dos
+- Validation des ages pour eviter les suggestions inappropriees
+- Interface responsive adaptee aux mobiles et desktop
 
 ## Outils, IA et moteurs en arriere-plan
 - React pour l'interface utilisateur
 - Vite comme serveur de développement et outil de build
 - Node.js pour le backend et la gestion des scripts
-- @google/genai pour l'interaction avec les modèles d'IA
+- OpenAI Image API cote serveur pour les essais photo personnelle
+- @google/genai conserve pour les anciens modes/fallbacks
 - Tailwind CSS pour le style et la mise en page
 - TypeScript pour le typage statique
 - ES Modules pour la gestion des dépendances
 - Git pour le versionnage du code
 
 ## Automatisations integrees
-- Analyse morphologique automatique via un schéma JSON strict
-- Génération rapide de prévisualisations réalistes
-- Génération des angles supplémentaires (face, profil gauche/droit, dos)
-- Retries automatiques en cas de saturation du service avec délai exponentiel
-- Validation automatique des âges pour éviter les suggestions inappropriées
-- Conservation automatique de l'identité, de la lumière et du contexte dans les prompts
+- Generation OpenAI limitee a un essai complet par jour
+- Creation d'une session entre la planche recommandations et la planche finale
+- Decoupage automatique des planches avec Sharp
+- Blocage du deuxieme essai journalier cote serveur
+- Validation automatique des ages pour eviter les suggestions inappropriees
+- Conservation automatique de l'identite, de la lumiere et du contexte dans les prompts
 
 ## Captures d'ecran
 ![Capture 1 - morphostyle](docs/captures/20-morphostyle-2026-06-25_03-17-30-desktop.png)
@@ -58,3 +59,5 @@ Après installation, l'utilisateur accède à l'application via un navigateur we
 - Ajout de la gestion automatique des retries avec délai exponentiel en cas de saturation du service d'IA
 - Validation stricte des âges pour exclure les suggestions inappropriées (ex : barbe pour enfants)
 - Amélioration de la robustesse des schémas JSON pour l'analyse morphologique
+- Ajout du mode OpenAI Image avec quota d'un essai complet par jour
+- Passage du parcours photo personnelle a deux planches: recommandations puis resultat final
