@@ -69,6 +69,7 @@ const App: React.FC = () => {
   const [selectedExampleId, setSelectedExampleId] = useState<string | null>(null);
   const [publicGenerations, setPublicGenerations] = useState<PublicGeneration[]>([]);
   const [dailyResults, setDailyResults] = useState<PublicGeneration[]>([]);
+  const [galleryDetail, setGalleryDetail] = useState<{ item: PublicGeneration; scope: 'daily' | 'public' } | null>(null);
   const [isPublicGalleryLoading, setIsPublicGalleryLoading] = useState(false);
   const [publishingProposalId, setPublishingProposalId] = useState<string | null>(null);
   const [publishedProposalIds, setPublishedProposalIds] = useState<string[]>([]);
@@ -218,6 +219,41 @@ const App: React.FC = () => {
   const imageDownloadName = (label: string, suffix: string, url = "") => {
     const extension = String(url).match(/\.(png|webp|jpg|jpeg)(?:$|\?)/i)?.[1]?.toLowerCase() || "jpg";
     return `${imageFileName(label, suffix)}.${extension === "jpeg" ? "jpg" : extension}`;
+  };
+
+  const viewLabel = (key: string) => {
+    if (key === "front") return "Face";
+    if (key === "left") return "Profil gauche";
+    if (key === "right") return "Profil droit";
+    if (key === "back") return "Dos";
+    return key;
+  };
+
+  const generationImages = (item: PublicGeneration) => [
+    { key: "front", label: viewLabel("front"), url: item.imageUrl },
+    ...Object.entries(item.additionalViews || {}).map(([key, url]) => ({
+      key,
+      label: viewLabel(key),
+      url
+    }))
+  ].filter(entry => Boolean(entry.url));
+
+  const openGenerationSheet = (item: PublicGeneration, scope: 'daily' | 'public') => {
+    setGalleryDetail({ item, scope });
+    setZoomImage(null);
+  };
+
+  const closeGenerationSheet = () => setGalleryDetail(null);
+
+  const formattedGenerationDate = (value: string) => {
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return "";
+    return date.toLocaleString("fr-FR", {
+      day: "2-digit",
+      month: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit"
+    });
   };
 
   const dailyGenerationFromProposal = (
@@ -765,7 +801,7 @@ const App: React.FC = () => {
             <button
               key={item.id}
               type="button"
-              onClick={() => setZoomImage(item.imageUrl)}
+              onClick={() => openGenerationSheet(item, 'daily')}
               className="group cursor-pointer overflow-hidden rounded-2xl border border-gray-100 bg-white text-left shadow-sm transition-all duration-200 hover:-translate-y-1 hover:border-rose-200 hover:shadow-xl focus:outline-none focus:ring-4 focus:ring-rose-100"
             >
               <div className="aspect-[3/4] overflow-hidden bg-gray-100">
@@ -783,6 +819,10 @@ const App: React.FC = () => {
               <div className="p-3">
                 <div className="truncate text-xs font-black text-gray-950">{item.styleName}</div>
                 <div className="mt-1 text-[9px] font-black uppercase tracking-widest text-gray-400">{item.sourceLabel}</div>
+                <div className="mt-2 inline-flex items-center gap-1.5 rounded-full bg-gray-50 px-2 py-1 text-[8px] font-black uppercase tracking-widest text-gray-500">
+                  <Images className="h-3 w-3" />
+                  Fiche {generationImages(item).length} image{generationImages(item).length > 1 ? "s" : ""}
+                </div>
               </div>
             </button>
           ))}
@@ -820,7 +860,7 @@ const App: React.FC = () => {
               <button
                 key={item.id}
                 type="button"
-                onClick={() => setZoomImage(item.imageUrl)}
+                onClick={() => openGenerationSheet(item, 'public')}
                 className="group cursor-pointer overflow-hidden rounded-2xl border border-gray-100 bg-white text-left shadow-sm transition-all duration-200 hover:-translate-y-1 hover:border-rose-200 hover:shadow-xl focus:outline-none focus:ring-4 focus:ring-rose-100"
               >
                 <div className="aspect-[3/4] overflow-hidden bg-gray-100">
@@ -841,6 +881,10 @@ const App: React.FC = () => {
                     <Images className="h-3 w-3" />
                     {item.sourceLabel}
                   </div>
+                  <div className="mt-2 inline-flex items-center gap-1.5 rounded-full bg-rose-50 px-2 py-1 text-[8px] font-black uppercase tracking-widest text-rose-600">
+                    <Images className="h-3 w-3" />
+                    Fiche {generationImages(item).length} image{generationImages(item).length > 1 ? "s" : ""}
+                  </div>
                 </div>
               </button>
             ))}
@@ -852,7 +896,7 @@ const App: React.FC = () => {
   return (
     <div className="min-h-screen flex flex-col bg-[#FDFCFB]">
       <Header />
-      {topRightBack && !zoomImage && (
+      {topRightBack && !zoomImage && !galleryDetail && (
         <div className="fixed right-4 top-4 z-[70] sm:right-8">
           <BackButton onClick={topRightBack.action} label={topRightBack.label} />
         </div>
@@ -1328,6 +1372,105 @@ const App: React.FC = () => {
           </div>
         )}
       </main>
+
+      {galleryDetail && (
+        <div className="fixed inset-0 z-[90] overflow-y-auto bg-black/70 px-4 py-6 backdrop-blur-xl animate-in fade-in duration-200 sm:py-10">
+          <div className="mx-auto max-w-6xl rounded-[2rem] bg-white p-4 shadow-2xl ring-1 ring-white/40 sm:p-6">
+            <div className="mb-5 flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+              <div>
+                <div className={`mb-2 inline-flex items-center gap-2 rounded-full px-3 py-1 text-[10px] font-black uppercase tracking-widest ${galleryDetail.scope === 'daily' ? 'bg-black text-white' : 'bg-rose-50 text-rose-600 ring-1 ring-rose-100'}`}>
+                  {galleryDetail.scope === 'daily' ? <Images className="h-3.5 w-3.5 text-rose-300" /> : <Globe2 className="h-3.5 w-3.5" />}
+                  {galleryDetail.scope === 'daily' ? 'Historique personnel' : 'Vitrine publique'}
+                </div>
+                <h2 className="serif text-3xl font-bold leading-tight text-gray-950 sm:text-4xl">{galleryDetail.item.styleName}</h2>
+                <div className="mt-2 flex flex-wrap gap-2 text-[10px] font-black uppercase tracking-widest text-gray-500">
+                  <span className="rounded-full bg-gray-50 px-3 py-1">{galleryDetail.item.sourceLabel}</span>
+                  <span className="rounded-full bg-gray-50 px-3 py-1">{galleryDetail.item.color}</span>
+                  {formattedGenerationDate(galleryDetail.item.createdAt) && (
+                    <span className="rounded-full bg-gray-50 px-3 py-1">{formattedGenerationDate(galleryDetail.item.createdAt)}</span>
+                  )}
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={closeGenerationSheet}
+                className="inline-flex min-h-11 cursor-pointer items-center justify-center gap-2 rounded-full border border-gray-100 bg-white px-4 text-sm font-black text-gray-600 shadow-sm transition-all hover:border-rose-200 hover:text-rose-600 focus:outline-none focus:ring-4 focus:ring-rose-100"
+              >
+                <X className="h-4 w-4" />
+                Fermer
+              </button>
+            </div>
+
+            <div className="grid gap-5 lg:grid-cols-[1.1fr_1fr]">
+              <div className="overflow-hidden rounded-[1.5rem] border border-gray-100 bg-gray-100 shadow-xl">
+                <button
+                  type="button"
+                  onClick={() => setZoomImage(galleryDetail.item.imageUrl)}
+                  className="group relative block aspect-[3/4] w-full cursor-pointer overflow-hidden"
+                  aria-label="Agrandir la vue de face"
+                >
+                  <img
+                    src={galleryDetail.item.imageUrl}
+                    alt={`${galleryDetail.item.styleName} face`}
+                    className="h-full w-full object-cover transition-transform duration-500 group-hover:scale-105"
+                    onError={(event) => {
+                      event.currentTarget.onerror = null;
+                      event.currentTarget.src = createLocalPreviewFallback(galleryDetail.item);
+                    }}
+                  />
+                  <div className="absolute inset-x-4 bottom-4 flex items-center justify-between gap-3 rounded-2xl bg-black/60 px-4 py-3 text-white backdrop-blur-xl">
+                    <span className="text-xs font-black uppercase tracking-widest">Face</span>
+                    <Maximize2 className="h-4 w-4" />
+                  </div>
+                </button>
+              </div>
+
+              <div className="flex flex-col gap-4">
+                <div className="rounded-3xl border border-gray-100 bg-gray-50 p-4">
+                  <div className="text-[10px] font-black uppercase tracking-widest text-gray-400">Morphologie</div>
+                  <div className="mt-1 text-sm font-black text-gray-950">{galleryDetail.item.faceShape}</div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  {generationImages(galleryDetail.item).map((entry) => (
+                    <div key={`${galleryDetail.item.id}-${entry.key}`} className="overflow-hidden rounded-2xl border border-gray-100 bg-white shadow-sm">
+                      <button
+                        type="button"
+                        onClick={() => setZoomImage(entry.url)}
+                        className="group relative block aspect-[3/4] w-full cursor-pointer overflow-hidden bg-gray-100"
+                        aria-label={`Agrandir ${entry.label}`}
+                      >
+                        <img
+                          src={entry.url}
+                          alt={`${galleryDetail.item.styleName} ${entry.label}`}
+                          className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-105"
+                          onError={(event) => {
+                            event.currentTarget.onerror = null;
+                            event.currentTarget.src = createLocalPreviewFallback(galleryDetail.item);
+                          }}
+                        />
+                        <div className="absolute inset-x-2 bottom-2 rounded-xl bg-black/55 px-2 py-1.5 text-[8px] font-black uppercase tracking-widest text-white backdrop-blur-md">
+                          {entry.label}
+                        </div>
+                      </button>
+                      <div className="p-2">
+                        <a
+                          href={entry.url}
+                          download={imageDownloadName(galleryDetail.item.styleName, entry.key, entry.url)}
+                          className="inline-flex min-h-10 w-full cursor-pointer items-center justify-center gap-2 rounded-xl bg-gray-50 px-2 text-[9px] font-black uppercase tracking-widest text-gray-600 transition-all hover:bg-rose-50 hover:text-rose-600 focus:outline-none focus:ring-4 focus:ring-rose-100"
+                        >
+                          <Download className="h-3.5 w-3.5" />
+                          Telecharger
+                        </a>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {zoomImage && (
         <div className="fixed inset-0 z-[100] bg-black/95 flex items-center justify-center p-4 animate-in fade-in duration-300">
