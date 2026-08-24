@@ -262,7 +262,11 @@ const loadSharp = () => {
   try {
     return require(CENTRAL_SHARP_MODULE);
   } catch {
-    return null;
+    try {
+      return require("sharp");
+    } catch {
+      return null;
+    }
   }
 };
 
@@ -3024,6 +3028,7 @@ const handleApi = async (req, res) => {
       openAiDailyTrialLimit: getOpenAiDailyTrialLimit(),
       openAiExtraTrialCodeConfigured: getOpenAiExtraTrialCodeEntries().length > 0,
       openAiExtraTrialUses: getOpenAiExtraTrialUses(),
+      sharpAvailable: Boolean(loadSharp()),
       falEnabled: false,
       freeFallbacks: provider === "free-chain" || provider === "ai-horde",
       localComfyAvailable,
