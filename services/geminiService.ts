@@ -59,7 +59,7 @@ const blobToDataUrl = (blob: Blob) =>
   new Promise<string>((resolve, reject) => {
     const reader = new FileReader();
     reader.onloadend = () => resolve(reader.result as string);
-    reader.onerror = () => reject(new Error("Lecture image FLUX impossible."));
+    reader.onerror = () => reject(new Error("Lecture image impossible."));
     reader.readAsDataURL(blob);
   });
 
@@ -124,7 +124,7 @@ export const generateOpenAiUploadRecommendations = async (
 
   const payload = await response.json().catch(() => ({}));
   if (!response.ok || !payload.ok) {
-    throwOpenAiServiceError(payload, response.status, "OpenAI indisponible");
+    throwOpenAiServiceError(payload, response.status, "Service image indisponible");
   }
 
   return {
@@ -132,7 +132,7 @@ export const generateOpenAiUploadRecommendations = async (
     hairTexture: payload.hairTexture || "Texture detectee depuis la photo",
     skinTone: payload.skinTone || "Teint preserve",
     detectedGender: payload.detectedGender || consultation.gender,
-    professionalAdvice: payload.professionalAdvice || "Photo chargee traitee avec OpenAI Image.",
+    professionalAdvice: payload.professionalAdvice || "Photo chargee traitee pour une recommandation personnalisee.",
     recommendedStyles: (payload.recommendedStyles || []) as StyleRecommendation[],
     generationSessionId: payload.generationSessionId,
     quota: payload.quota
@@ -159,7 +159,7 @@ export const generateOpenAiSelectedResult = async (
 
   const payload = await response.json().catch(() => ({}));
   if (!response.ok || !payload.ok) {
-    throwOpenAiServiceError(payload, response.status, "OpenAI indisponible");
+    throwOpenAiServiceError(payload, response.status, "Service image indisponible");
   }
 
   return payload.proposal;
@@ -232,7 +232,7 @@ export const generateAlibabaUploadRecommendations = async (
 
   const payload = await response.json().catch(() => ({}));
   if (!response.ok || !payload.ok) {
-    throw new Error(payload.error || `Alibaba indisponible: HTTP ${response.status}`);
+    throw new Error(payload.error || `Service image indisponible: HTTP ${response.status}`);
   }
 
   return {
@@ -240,7 +240,7 @@ export const generateAlibabaUploadRecommendations = async (
     hairTexture: payload.hairTexture || "Texture detectee depuis la photo",
     skinTone: payload.skinTone || "Teint preserve",
     detectedGender: payload.detectedGender || consultation.gender,
-    professionalAdvice: payload.professionalAdvice || "Photo chargee traitee avec la methode Alibaba haute qualite.",
+    professionalAdvice: payload.professionalAdvice || "Photo chargee traitee avec la methode haute qualite.",
     recommendedStyles: (payload.recommendedStyles || []) as StyleRecommendation[]
   };
 };
@@ -534,7 +534,7 @@ const waitForPuter = (timeoutMs = 12000) =>
       script.src = "https://js.puter.com/v2/";
       script.async = true;
       script.dataset.puterSdk = "true";
-      script.onerror = () => reject(new Error("Impossible de charger Puter.js. Verifiez la connexion internet."));
+      script.onerror = () => reject(new Error("Impossible de charger le service image. Verifiez la connexion internet."));
       document.head.appendChild(script);
     }
 
@@ -545,7 +545,7 @@ const waitForPuter = (timeoutMs = 12000) =>
         return;
       }
       if (Date.now() - startedAt > timeoutMs) {
-        reject(new Error("Puter.js n'est pas charge. Verifiez la connexion internet ou le script js.puter.com."));
+        reject(new Error("Le service image n'est pas charge. Verifiez la connexion internet."));
         return;
       }
       window.setTimeout(tick, 250);
@@ -554,7 +554,7 @@ const waitForPuter = (timeoutMs = 12000) =>
   });
 
 const getImageResultSrc = async (result: any): Promise<string> => {
-  if (!result) throw new Error("Puter n'a retourne aucune image.");
+  if (!result) throw new Error("Le service image n'a retourne aucune image.");
   if (typeof result === "string") return result;
   if (result instanceof HTMLImageElement && result.src) return result.src;
   if (result.url) return result.url;
@@ -563,7 +563,7 @@ const getImageResultSrc = async (result: any): Promise<string> => {
   if (result.src) return result.src;
   if (result.data) return result.data.startsWith("data:") ? result.data : `data:image/png;base64,${result.data}`;
   if (result.b64_json) return `data:image/png;base64,${result.b64_json}`;
-  throw new Error("Format de reponse Puter image inconnu.");
+  throw new Error("Format de reponse image inconnu.");
 };
 
 const createPreviewGenerationPrompt = (rawStyle: any, gender: string, ageGroup: string) => {
@@ -778,19 +778,19 @@ const parseGradioEventData = (eventStream: string) => {
     } catch {
       // Keep raw Gradio error text.
     }
-    throw new Error(message ? `FLUX Kontext a refuse la retouche: ${message}` : "FLUX Kontext a refuse la retouche.");
+    throw new Error(message ? `Le service image a refuse la retouche: ${message}` : "Le service image a refuse la retouche.");
   }
 
   const completeBlock = [...blocks].reverse().find(block => block.includes("event: complete"));
-  if (!completeBlock) throw new Error("FLUX Kontext n'a pas termine la file d'attente.");
+  if (!completeBlock) throw new Error("Le service image n'a pas termine la file d'attente.");
 
   const rawData = getSseData(completeBlock);
-  if (!rawData || rawData === "null") throw new Error("FLUX Kontext a retourne une reponse vide.");
+  if (!rawData || rawData === "null") throw new Error("Le service image a retourne une reponse vide.");
 
   const payload = JSON.parse(rawData);
   const result = Array.isArray(payload) ? payload[0] : payload;
   const resultUrl = result?.url || (result?.path ? `${HF_KONTEXT_SPACE_URL}/gradio_api/file=${result.path}` : "");
-  if (!resultUrl) throw new Error("FLUX Kontext n'a pas retourne d'image exploitable.");
+  if (!resultUrl) throw new Error("Le service image n'a pas retourne d'image exploitable.");
 
   return resultUrl as string;
 };
@@ -819,12 +819,12 @@ const generateHuggingFaceKontextHairstyleImageOnce = async (
     body: uploadForm
   }, 45000);
   if (!uploadResponse.ok) {
-    throw new Error("Le service FLUX Kontext n'a pas accepte la photo chargee.");
+    throw new Error("Le service image n'a pas accepte la photo chargee.");
   }
 
   const uploadedPaths = await uploadResponse.json();
   const uploadedPath = uploadedPaths?.[0];
-  if (!uploadedPath) throw new Error("Upload FLUX Kontext incomplet.");
+  if (!uploadedPath) throw new Error("Chargement image incomplet.");
 
   const prompt = createHairstyleEditPrompt(style, gender, angle, ageGroup, attempt);
   const inferResponse = await fetchWithTimeout(`${HF_KONTEXT_SPACE_URL}/gradio_api/call/infer`, {
@@ -846,15 +846,15 @@ const generateHuggingFaceKontextHairstyleImageOnce = async (
     })
   }, 45000);
   if (!inferResponse.ok) {
-    throw new Error("Le service FLUX Kontext n'a pas demarre la retouche.");
+    throw new Error("Le service image n'a pas demarre la retouche.");
   }
 
   const { event_id: eventId } = await inferResponse.json();
-  if (!eventId) throw new Error("File d'attente FLUX Kontext indisponible.");
+  if (!eventId) throw new Error("File d'attente du service image indisponible.");
 
   const resultResponse = await fetchWithTimeout(`${HF_KONTEXT_SPACE_URL}/gradio_api/call/infer/${eventId}`, {}, HF_KONTEXT_TIMEOUT_MS);
   if (!resultResponse.ok) {
-    throw new Error("La retouche FLUX Kontext n'a pas abouti.");
+    throw new Error("La retouche photo n'a pas abouti.");
   }
 
   const eventStream = await resultResponse.text();
@@ -882,7 +882,7 @@ const generateHuggingFaceKontextHairstyleImage = async (
       return await generateHuggingFaceKontextHairstyleImageOnce(originalBase64, style, gender, angle, ageGroup, attempt);
     } catch (error) {
       lastError = error;
-      console.warn(`Tentative FLUX Kontext ${attempt + 1}/${HF_KONTEXT_ATTEMPTS} echouee`, error);
+      console.warn(`Tentative service image ${attempt + 1}/${HF_KONTEXT_ATTEMPTS} echouee`, error);
       if (attempt < HF_KONTEXT_ATTEMPTS - 1) await sleep(1800 + attempt * 1400);
     }
   }
@@ -891,28 +891,28 @@ const generateHuggingFaceKontextHairstyleImage = async (
 
   if (USE_FREE_IMAGE_TO_IMAGE_FALLBACKS) {
     try {
-      console.warn("FLUX Kontext gratuit indisponible, tentative Puter.js gratuit.");
+      console.warn("Service image principal indisponible, tentative secondaire.");
       return await generatePuterFluxHairstyleImage(originalBase64, style, gender, angle, ageGroup);
     } catch (puterError) {
-      fallbackErrors.push(puterError instanceof Error ? `Puter: ${puterError.message}` : "Puter indisponible");
+      fallbackErrors.push(puterError instanceof Error ? `Service secondaire: ${puterError.message}` : "Service secondaire indisponible");
     }
   }
 
   if (HF_KONTEXT_FALLBACK_ENDPOINT) {
     try {
-      console.warn("FLUX Kontext/Puter indisponibles, tentative fallback serveur gratuit.");
+      console.warn("Services image indisponibles, tentative fallback serveur.");
       return await requestServerHairstyleImage(HF_KONTEXT_FALLBACK_ENDPOINT, originalBase64, style, gender, angle, ageGroup);
     } catch (fallbackError) {
       const hfDetail = lastError instanceof Error ? lastError.message : "reponse vide";
       const fallbackDetail = fallbackError instanceof Error ? fallbackError.message : "fallback indisponible";
       const extra = fallbackErrors.length ? `; ${fallbackErrors.join("; ")}` : "";
-      throw new Error(`Les generateurs gratuits image-to-image ont echoue (${hfDetail}${extra}; serveur: ${fallbackDetail}).`);
+      throw new Error(`Les generateurs photo ont echoue (${hfDetail}${extra}; serveur: ${fallbackDetail}).`);
     }
   }
 
   const detail = lastError instanceof Error ? lastError.message : "reponse vide";
   const extra = fallbackErrors.length ? ` ${fallbackErrors.join("; ")}` : "";
-  throw new Error(`Les generateurs gratuits image-to-image sont temporairement indisponibles (${detail}).${extra}`);
+  throw new Error(`Les generateurs photo sont temporairement indisponibles (${detail}).${extra}`);
 };
 
 const hairPaletteFor = (rawStyle: any) => {

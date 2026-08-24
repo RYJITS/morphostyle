@@ -9,7 +9,7 @@ import {
   Loader2, Sparkles, ArrowLeft, AlertTriangle, X, ChevronRight, 
   RotateCcw, CheckCircle2, Maximize2, User, Info,
   Baby, GraduationCap, Briefcase, Glasses, Users, Upload,
-  Download, Globe2, ImagePlus, Images
+  Download, Globe2, Home, ImagePlus, Images
 } from 'lucide-react';
 
 const genderLabels: Record<ConsultationData["gender"], string> = {
@@ -91,28 +91,28 @@ const App: React.FC = () => {
   const resultTitle = preparedResult
     ? preparedResult.styleName
     : openAiUploadMode
-      ? "Resultat OpenAI"
+      ? "Resultat personnalise"
       : hfKontextMode
-      ? "Coupe modifiee par image-to-image"
+      ? "Coupe modifiee"
       : localRetouchMode
         ? "Photo retouchee localement"
         : imageToImageMode
-          ? "Photo transformee par image-to-image"
+          ? "Photo transformee"
           : freeImageApiMode
-            ? "Image Generee par API Gratuite"
+            ? "Image generee"
             : "Simulations Haute Fidélité";
   const resultDescription = openAiUploadMode
-    ? "La coupe selectionnee a ete generee avec une seconde planche OpenAI, puis decoupee en portrait de face, profils et dos."
+    ? "La coupe selectionnee a ete preparee avec une seconde planche, puis decoupee en portrait de face, profils et dos."
     : hfKontextMode
-    ? "La photo chargee est envoyee en image-to-image avec une consigne stricte: garder la personne et modifier uniquement la coupe."
+    ? "La photo chargee est traitee avec une consigne stricte: garder la personne et modifier uniquement la coupe."
     : localRetouchMode
-      ? "La photo chargee reste l'entree principale. La coupe choisie est simulee dans le navigateur, sans Google, sans Puter et sans appel payant."
+      ? "La photo chargee reste l'entree principale. La coupe choisie est simulee dans le navigateur."
       : puterFluxMode
-        ? "La photo chargee sert d'entree a FLUX Kontext via Puter. Aucune API Google n'est utilisee."
+        ? "La photo chargee sert de reference. Seule la coupe choisie doit etre modifiee."
         : imageToImageMode
-          ? "La photo chargee sert d'entree au modele. Seule la coupe choisie doit etre modifiee."
+          ? "La photo chargee sert de reference. Seule la coupe choisie doit etre modifiee."
           : freeImageApiMode
-            ? "La coupe choisie est generee par API gratuite. Le portrait original reste votre reference."
+            ? "La coupe choisie est generee a partir du portrait original."
             : "Seuls les cheveux et la barbe ont été adaptés. Le décor original est préservé.";
   const showOriginalPreview = !!userImage && state !== AppState.IDLE && state !== AppState.RESULTS;
   const originalPreviewStatus = state === AppState.CONSULTATION
@@ -201,7 +201,7 @@ const App: React.FC = () => {
       const result = await activateOpenAiTrialCode(code);
       clearServiceAlert();
       setTrialCode('');
-      setNotice(result.message || "Code active. Relancez la generation OpenAI.");
+      setNotice(result.message || "Code active. Relancez la generation.");
     } catch (err: any) {
       setTrialCodeMessage(err?.message || "Activation du code impossible.");
     } finally {
@@ -425,6 +425,18 @@ const App: React.FC = () => {
     </button>
   );
 
+  const HomeButton = () => (
+    <button
+      type="button"
+      onClick={resetExperience}
+      title="Accueil"
+      aria-label="Accueil"
+      className="relative z-10 inline-flex h-11 w-11 cursor-pointer items-center justify-center rounded-full border border-gray-100 bg-white text-gray-600 shadow-sm transition-all hover:border-rose-200 hover:text-rose-600 focus:outline-none focus:ring-4 focus:ring-rose-100"
+    >
+      <Home className="h-4 w-4" />
+    </button>
+  );
+
   const StepHeader = ({
     title,
     children,
@@ -473,7 +485,7 @@ const App: React.FC = () => {
     const operationId = beginOperation();
     try {
       setState(AppState.ANALYZING);
-      setLoadingStep(selectedExample ? `Expertise locale du profil ${selectedExample.name}...` : "Generation OpenAI des 4 propositions du jour...");
+      setLoadingStep(selectedExample ? `Expertise locale du profil ${selectedExample.name}...` : "Preparation des 4 propositions du jour...");
       const result = selectedExample
         ? (() => {
           const localAnalysis = createLocalExampleAnalysis(consultation, selectedExample.faceShape, selectedExample.hairTexture, selectedExample.skinTone, getExampleSourceNote(selectedExample));
@@ -495,7 +507,7 @@ const App: React.FC = () => {
       }
     } catch (err: any) {
       if (!isCurrentOperation(operationId)) return;
-      showServiceError(err, "Le service OpenAI est indisponible. Veuillez patienter.");
+      showServiceError(err, "Le service image est indisponible. Veuillez patienter.");
       setState(AppState.CONSULTATION);
     }
   };
@@ -704,7 +716,7 @@ const App: React.FC = () => {
     try {
       for (let i = 0; i < chosenStyles.length; i++) {
         const style = chosenStyles[i];
-        setLoadingStep(isOpenAiUploadStyle(style) ? `Planche finale OpenAI : ${style.name}...` : hfKontextMode ? `Image-to-image modifie vraiment la coupe : ${style.name}...` : localRetouchMode ? `Retouche locale sur votre photo : ${style.name}...` : imageToImageMode ? `Retouche image-to-image : ${style.name}...` : freeImageApiMode ? `Generation API gratuite : ${style.name}...` : `Transformation en cours : ${style.name}...`);
+        setLoadingStep(isOpenAiUploadStyle(style) ? `Planche finale : ${style.name}...` : hfKontextMode ? `Modification de la coupe : ${style.name}...` : localRetouchMode ? `Retouche locale sur votre photo : ${style.name}...` : imageToImageMode ? `Retouche de la photo : ${style.name}...` : freeImageApiMode ? `Generation de la coupe : ${style.name}...` : `Transformation en cours : ${style.name}...`);
         try {
           const openAiProposal = isOpenAiUploadStyle(style)
             ? await generateOpenAiSelectedResult(userImage, consultation, style, analysis.generationSessionId)
@@ -726,7 +738,7 @@ const App: React.FC = () => {
         } catch (innerErr) {
           console.error(`Echec pour ${style.name}`, innerErr);
           if (imageToImageMode) {
-            throw new Error(innerErr instanceof Error ? innerErr.message : "La retouche image-to-image n'a pas abouti.");
+            throw new Error(innerErr instanceof Error ? innerErr.message : "La retouche photo n'a pas abouti.");
           }
         }
       }
@@ -980,8 +992,9 @@ const App: React.FC = () => {
     <div className="min-h-screen flex flex-col bg-[#FDFCFB]">
       <Header />
       {topRightBack && !zoomImage && !galleryDetail && (
-        <div className="fixed right-4 top-4 z-[70] sm:right-8">
+        <div className="fixed right-4 top-4 z-[70] flex items-center gap-2 sm:right-8">
           <BackButton onClick={topRightBack.action} label={topRightBack.label} />
+          <HomeButton />
         </div>
       )}
       {showOriginalPreview && (
@@ -1004,7 +1017,7 @@ const App: React.FC = () => {
                       value={trialCode}
                       onChange={(event) => setTrialCode(event.target.value)}
                       placeholder="Utiliser un code"
-                      aria-label="Code bonus OpenAI"
+                      aria-label="Code bonus"
                       className="min-h-11 flex-1 rounded-xl border border-red-100 bg-white px-3 text-sm font-bold text-gray-900 outline-none transition-all placeholder:text-gray-400 focus:border-rose-300 focus:ring-4 focus:ring-rose-100"
                     />
                     <button
@@ -1041,7 +1054,7 @@ const App: React.FC = () => {
         {state === AppState.IDLE && (
           <div className="mx-auto max-w-6xl py-12 text-center animate-in fade-in duration-1000">
             <div className="mx-auto max-w-3xl">
-              <h1 className="serif text-5xl md:text-6xl font-bold text-gray-900 mb-5">Expertise <span className="text-rose-600 italic">Visagiste</span></h1>
+              <h1 className="serif text-5xl md:text-6xl font-bold text-gray-900 mb-5">Expertise <span className="text-rose-600 italic">Visage</span></h1>
               <p className="text-sm text-gray-500 mb-10 max-w-xl mx-auto">Chargez une photo ou selectionnez un profil exemple.</p>
               <DemoExampleGallery />
             </div>
@@ -1089,7 +1102,7 @@ const App: React.FC = () => {
                 </div>
                 <div className="min-w-0 flex-1">
                   <div className="text-[10px] font-black uppercase tracking-widest text-rose-500">Photo chargee</div>
-                  <div className="mt-1 text-xl font-black text-gray-950">Essai OpenAI du jour</div>
+                  <div className="mt-1 text-xl font-black text-gray-950">Essai photo du jour</div>
                   <div className="mt-1 text-sm font-medium leading-snug text-gray-500">Une planche 4x4 genere les 4 propositions, puis une seconde planche finalise la coupe choisie. Limite: 1 essai complet par jour.</div>
                 </div>
                 <button
@@ -1195,7 +1208,7 @@ const App: React.FC = () => {
         {state === AppState.SELECTION && analysis && (
           <div className="animate-in fade-in duration-700 pb-16 sm:pb-36">
             <div className="mx-auto max-w-6xl">
-              <StepHeader title="Recommandations Visagiste">
+              <StepHeader title="Recommandations Visage">
               <div className="bg-rose-50/50 p-6 rounded-3xl border border-rose-100 inline-block max-w-2xl italic text-rose-900 shadow-sm leading-relaxed">
                 "{analysis.professionalAdvice}"
               </div>

@@ -596,7 +596,7 @@ const reserveOpenAiDailyTrial = async ({ req, payload, sourceHash, combo }) => {
   const beforeQuota = getOpenAiClientQuota(client);
 
   if (beforeQuota.remaining <= 0) {
-    throw Object.assign(new Error(`Votre essai OpenAI du jour est deja utilise. Revenez ${getOpenAiQuotaResetLabel()} ou utilisez un profil exemple.`), {
+    throw Object.assign(new Error(`Votre essai photo du jour est deja utilise. Revenez ${getOpenAiQuotaResetLabel()} ou utilisez un profil exemple.`), {
       status: 429,
       allowCodeActivation: true,
       quota: beforeQuota
@@ -629,13 +629,13 @@ const getOpenAiFinalSession = async ({ req, payload, sourceHash, combo }) => {
   const session = client?.sessions?.[sessionId];
 
   if (!sessionId || !session) {
-    throw Object.assign(new Error("Session OpenAI introuvable. Relancez un essai demain ou choisissez un profil exemple."), { status: 403 });
+    throw Object.assign(new Error("Session de generation introuvable. Relancez un essai demain ou choisissez un profil exemple."), { status: 403 });
   }
   if (!session.finalRemaining) {
-    throw Object.assign(new Error("Le resultat final de cet essai OpenAI a deja ete genere."), { status: 429 });
+    throw Object.assign(new Error("Le resultat final de cet essai a deja ete genere."), { status: 429 });
   }
   if (session.sourceHash !== sourceHash || session.combo !== combo) {
-    throw Object.assign(new Error("La photo ou les reglages ne correspondent plus a la session OpenAI initiale."), { status: 403 });
+    throw Object.assign(new Error("La photo ou les reglages ne correspondent plus a la session initiale."), { status: 403 });
   }
 
   return { usage, clientKey, sessionId, session };
@@ -721,24 +721,24 @@ const friendlyAlibabaError = (payload, fallbackStatus) => {
   if (code === "AllocationQuota.FreeTierOnly") {
     return {
       status: 429,
-      message: "Le quota gratuit Alibaba est epuise. Pour continuer, il faut attendre le renouvellement du quota, ajouter un moyen de paiement Alibaba Cloud, ou desactiver le mode \"free tier only\" dans la console Alibaba."
+      message: "Le quota gratuit du service image est epuise. Pour continuer, il faut attendre le renouvellement du quota ou verifier la configuration du compte."
     };
   }
   if (code === "InvalidApiKey") {
     return {
       status: 401,
-      message: "La cle Alibaba n'est pas acceptee par cet endpoint. Verifiez Alibaba_API_KEY et la region DashScope configuree."
+      message: "La cle du service image n'est pas acceptee. Verifiez la configuration cote serveur."
     };
   }
   if (fallbackStatus === 429) {
     return {
       status: 429,
-      message: "Alibaba refuse la generation pour une limite de quota ou de debit. Reessayez plus tard."
+      message: "Le service image refuse la generation pour une limite de quota ou de debit. Reessayez plus tard."
     };
   }
   return {
     status: fallbackStatus || 502,
-    message: `Alibaba API indisponible: ${alibabaErrorText(payload)}`
+    message: `Service image indisponible: ${alibabaErrorText(payload)}`
   };
 };
 
@@ -784,16 +784,16 @@ const pollAlibabaTask = async (endpoint, apiKey, taskId) => {
     const status = json?.output?.task_status || json?.task_status;
     if (status === "SUCCEEDED") return json;
     if (["FAILED", "CANCELED", "UNKNOWN"].includes(status)) {
-      throw Object.assign(new Error(`Alibaba task ${status}: ${alibabaErrorText(json)}`), { status: 502 });
+      throw Object.assign(new Error(`Generation distante ${status}: ${alibabaErrorText(json)}`), { status: 502 });
     }
   }
-  throw Object.assign(new Error("Timeout Alibaba pendant la generation."), { status: 504 });
+  throw Object.assign(new Error("Timeout du service image pendant la generation."), { status: 504 });
 };
 
 const callAlibabaImage = async ({ body }) => {
   const apiKey = getAlibabaApiKey();
   if (isPlaceholderEnvValue(apiKey)) {
-    throw Object.assign(new Error("Alibaba_API_KEY manquante dans D:/00_Cerveau_IA/API/env.Local."), { status: 503 });
+    throw Object.assign(new Error("Cle du service image manquante cote serveur."), { status: 503 });
   }
 
   const errors = [];
@@ -809,7 +809,7 @@ const callAlibabaImage = async ({ body }) => {
     try {
       const submitted = await postAlibabaJson(endpoint, apiKey, body, true);
       const taskId = submitted?.output?.task_id || submitted?.task_id;
-      if (!taskId) throw Object.assign(new Error(`Alibaba API: aucun task_id retourne.`), { status: 502 });
+      if (!taskId) throw Object.assign(new Error(`Service image: aucune tache retournee.`), { status: 502 });
       return await pollAlibabaTask(endpoint, apiKey, taskId);
     } catch (error) {
       errors.push(error);
@@ -819,7 +819,7 @@ const callAlibabaImage = async ({ body }) => {
   const firstQuota = errors.find((error) => error.status === 429);
   if (firstQuota) throw firstQuota;
   const last = errors[errors.length - 1];
-  throw Object.assign(new Error(last?.message || "Alibaba API indisponible."), { status: last?.status || 502 });
+  throw Object.assign(new Error(last?.message || "Service image indisponible."), { status: last?.status || 502 });
 };
 
 const downloadAlibabaImageBuffer = async (image) => {
@@ -830,7 +830,7 @@ const downloadAlibabaImageBuffer = async (image) => {
 
   const response = await fetch(image);
   if (!response.ok) {
-    throw Object.assign(new Error(`Telechargement image Alibaba impossible: HTTP ${response.status}`), { status: 502 });
+    throw Object.assign(new Error(`Telechargement image impossible: HTTP ${response.status}`), { status: 502 });
   }
   return Buffer.from(await response.arrayBuffer());
 };
@@ -914,7 +914,7 @@ const buildAlibabaRequestBody = ({ imageDataUrl, prompt }) => ({
 const cropAlibabaVariantViews = async ({ sheetBuffer, sessionId, combo, variant }) => {
   const sharp = loadSharp();
   if (!sharp) {
-    throw Object.assign(new Error("Sharp indisponible pour decouper la planche Alibaba."), { status: 503 });
+    throw Object.assign(new Error("Outil de decoupage indisponible pour preparer la planche."), { status: 503 });
   }
 
   const metadata = await sharp(sheetBuffer).metadata();
@@ -958,7 +958,7 @@ const buildAlibabaStyle = ({ consultation, variant, urls }) => {
   return {
     id: `alibaba-upload-${consultation.targetLength}-${consultation.maintenance}-${consultation.lifestyle}-${variant}`,
     name: `${lengthLabelsFr(consultation.targetLength)} ${lifestyle} ${alibabaVariantLabels[variant]}`,
-    description: `Planche Alibaba haute qualite 2x2, ${length}, ${maintenance}, univers ${lifestyle}.`,
+    description: `Planche haute qualite 2x2, ${length}, ${maintenance}, univers ${lifestyle}.`,
     color: consultation.gender === "female" ? "Naturel lumineux" : "Naturel",
     beardStyle: canBeard ? "Toilettage barbe adapte" : "Aucune",
     whyItWorks: `Proposition basee sur la morphologie visible de la photo chargee, avec ${length}, ${maintenance} et univers ${lifestyle}.`,
@@ -1000,12 +1000,12 @@ const generateAlibabaUploadRecommendations = async (payload) => {
       const body = buildAlibabaRequestBody({ imageDataUrl: source.dataUrl, prompt });
       const result = await callAlibabaImage({ body });
       const generatedImage = alibabaImageFromResponse(result);
-      if (!generatedImage) throw Object.assign(new Error("Alibaba n'a pas retourne d'image."), { status: 502 });
+      if (!generatedImage) throw Object.assign(new Error("Le service image n'a pas retourne d'image."), { status: 502 });
       const sheetBuffer = await downloadAlibabaImageBuffer(generatedImage);
       const urls = await cropAlibabaVariantViews({ sheetBuffer, sessionId, combo, variant });
       styles.push(buildAlibabaStyle({ consultation, variant, urls }));
     } catch (error) {
-      warning = error.message || "Generation Alibaba interrompue.";
+      warning = error.message || "Generation interrompue.";
       if (!styles.length) throw error;
       break;
     }
@@ -1017,7 +1017,7 @@ const generateAlibabaUploadRecommendations = async (payload) => {
     skinTone: "Teint preserve depuis la photo chargee",
     detectedGender: consultation.gender || "non-binary",
     professionalAdvice: [
-      `Photo chargee traitee avec la methode Alibaba haute qualite 2x2.`,
+      `Photo chargee traitee avec la methode haute qualite 2x2.`,
       `Selection: ${consultationLabels.length[consultation.targetLength] || "longueur adaptee"}, ${consultationLabels.maintenance[consultation.maintenance] || "entretien adapte"}, univers ${consultationLabels.lifestyle[consultation.lifestyle] || "style adapte"}.`,
       warning ? `Generation partielle: ${warning}` : "Les 4 propositions ont ete generees puis decoupees localement."
     ].join(" "),
@@ -1047,18 +1047,18 @@ const friendlyOpenAiError = (payload, fallbackStatus) => {
   if (fallbackStatus === 401 || code === "invalid_api_key") {
     return {
       status: 401,
-      message: "La cle OpenAI n'est pas acceptee. Verifiez OPENAI_API_KEY cote serveur."
+      message: "La cle du service image n'est pas acceptee. Verifiez la configuration cote serveur."
     };
   }
   if (fallbackStatus === 429 || /quota|rate/i.test(`${code} ${type}`)) {
     return {
       status: 429,
-      message: "OpenAI refuse la generation pour une limite de quota ou de debit. Reessayez plus tard."
+      message: "Le service image refuse la generation pour une limite de quota ou de debit. Reessayez plus tard."
     };
   }
   return {
     status: fallbackStatus || 502,
-    message: `OpenAI Image indisponible: ${openAiErrorText(payload)}`
+    message: `Service image indisponible: ${openAiErrorText(payload)}`
   };
 };
 
@@ -1087,7 +1087,7 @@ const buildOpenAiImageForm = ({ source, prompt, size }) => {
 const callOpenAiImageEdit = async ({ source, prompt, size }) => {
   const apiKey = getOpenAiApiKey();
   if (isPlaceholderEnvValue(apiKey)) {
-    throw Object.assign(new Error("OPENAI_API_KEY manquante cote serveur."), { status: 503 });
+    throw Object.assign(new Error("Cle du service image manquante cote serveur."), { status: 503 });
   }
 
   const response = await fetch("https://api.openai.com/v1/images/edits", {
@@ -1133,7 +1133,7 @@ const downloadOpenAiImageBuffer = async (image) => {
 
   const response = await fetch(image);
   if (!response.ok) {
-    throw Object.assign(new Error(`Telechargement image OpenAI impossible: HTTP ${response.status}`), { status: 502 });
+    throw Object.assign(new Error(`Telechargement image impossible: HTTP ${response.status}`), { status: 502 });
   }
   return Buffer.from(await response.arrayBuffer());
 };
@@ -1196,7 +1196,7 @@ const buildOpenAiFinalPrompt = ({ consultation = {}, style = {} }) => {
 const cropOpenAiRecommendationPreviews = async ({ sheetBuffer, sessionId, combo }) => {
   const sharp = loadSharp();
   if (!sharp) {
-    throw Object.assign(new Error("Sharp indisponible pour decouper la planche OpenAI."), { status: 503 });
+    throw Object.assign(new Error("Outil de decoupage indisponible pour preparer la planche."), { status: 503 });
   }
 
   const metadata = await sharp(sheetBuffer).metadata();
@@ -1231,7 +1231,7 @@ const cropOpenAiRecommendationPreviews = async ({ sheetBuffer, sessionId, combo 
 const cropOpenAiFinalViews = async ({ sheetBuffer, sessionId, combo, styleId }) => {
   const sharp = loadSharp();
   if (!sharp) {
-    throw Object.assign(new Error("Sharp indisponible pour decouper la planche OpenAI."), { status: 503 });
+    throw Object.assign(new Error("Outil de decoupage indisponible pour preparer la planche."), { status: 503 });
   }
 
   const metadata = await sharp(sheetBuffer).metadata();
@@ -1274,7 +1274,7 @@ const buildOpenAiStyle = ({ consultation, variant, previewUrl, sessionId }) => {
   return {
     id: `openai-upload-${consultation.targetLength}-${consultation.maintenance}-${consultation.lifestyle}-${variant}`,
     name: `${lengthLabelsFr(consultation.targetLength)} ${lifestyle} ${openAiVariantLabels[variant]}`,
-    description: `Proposition OpenAI issue de la planche 4x4: ${length}, ${maintenance}, univers ${lifestyle}.`,
+    description: `Proposition issue de la planche 4x4: ${length}, ${maintenance}, univers ${lifestyle}.`,
     color: consultation.gender === "female" ? "Naturel lumineux" : "Naturel",
     beardStyle: canBeard ? "Toilettage barbe adapte" : "Aucune",
     whyItWorks: `Proposition basee sur la morphologie visible de la photo chargee, avec ${length}, ${maintenance} et univers ${lifestyle}.`,
@@ -1298,7 +1298,7 @@ const generateOpenAiUploadRecommendations = async (req, payload) => {
   const size = process.env.OPENAI_RECOMMENDATION_SIZE || process.env.OPENAI_IMAGE_SIZE || "1024x1536";
   const result = await callOpenAiImageEdit({ source, prompt, size });
   const generatedImage = openAiImageFromResponse(result);
-  if (!generatedImage) throw Object.assign(new Error(`OpenAI n'a pas retourne d'image: ${openAiErrorText(result)}`), { status: 502 });
+  if (!generatedImage) throw Object.assign(new Error(`Le service image n'a pas retourne d'image: ${openAiErrorText(result)}`), { status: 502 });
 
   const sheetBuffer = await downloadOpenAiImageBuffer(generatedImage);
   const previewUrls = await cropOpenAiRecommendationPreviews({ sheetBuffer, sessionId, combo });
@@ -1312,7 +1312,7 @@ const generateOpenAiUploadRecommendations = async (req, payload) => {
     skinTone: "Teint preserve depuis la photo chargee",
     detectedGender: consultation.gender || "non-binary",
     professionalAdvice: [
-      "Photo personnelle traitee avec OpenAI Image.",
+      "Photo personnelle traitee avec une generation personnalisee.",
       `Selection: ${consultationLabels.length[consultation.targetLength] || "longueur adaptee"}, ${consultationLabels.maintenance[consultation.maintenance] || "entretien adapte"}, univers ${consultationLabels.lifestyle[consultation.lifestyle] || "style adapte"}.`,
       "Les 4 propositions viennent d'une seule planche 4x4. La coupe choisie generera ensuite une planche finale incluse dans l'essai du jour."
     ].join(" "),
@@ -1333,7 +1333,7 @@ const generateOpenAiSelectedResult = async (req, payload) => {
   const size = process.env.OPENAI_FINAL_SIZE || process.env.OPENAI_IMAGE_SIZE || "1024x1536";
   const result = await callOpenAiImageEdit({ source, prompt, size });
   const generatedImage = openAiImageFromResponse(result);
-  if (!generatedImage) throw Object.assign(new Error(`OpenAI n'a pas retourne d'image: ${openAiErrorText(result)}`), { status: 502 });
+  if (!generatedImage) throw Object.assign(new Error(`Le service image n'a pas retourne d'image: ${openAiErrorText(result)}`), { status: 502 });
 
   const sheetBuffer = await downloadOpenAiImageBuffer(generatedImage);
   const styleId = safeStyleId(style);
@@ -1345,7 +1345,7 @@ const generateOpenAiSelectedResult = async (req, payload) => {
     imageUrl: urls.front,
     styleName: style.name,
     description: style.description,
-    whyItWorks: `${style.whyItWorks || "Resultat final base sur la morphologie et les reglages choisis."} Planche finale generee avec OpenAI puis decoupee localement.`,
+    whyItWorks: `${style.whyItWorks || "Resultat final base sur la morphologie et les reglages choisis."} Planche finale generee puis decoupee localement.`,
     color: style.color,
     beardStyle: style.beardStyle,
     additionalViews: {
@@ -1648,7 +1648,7 @@ const buildLocalComfyPreviewImagePrompt = (payload) => {
     ? "dense visible hair on top, short textured quiff, clipped tapered sides, full natural hairline, thick real hair strands, not bald, not buzz cut, no shaved scalp"
     : "";
   return [
-    "realistic image-to-image salon preview edit of the uploaded portrait",
+    "realistic salon preview edit of the uploaded portrait",
     "keep the exact same person, face identity, expression, skin, eyes, nose, mouth, jaw, neck, clothes, background, lighting and camera framing",
     "modify only the real hair inside the masked hair area",
     "replace the current haircut with the selected target haircut, realistic hair growing from the scalp",
@@ -3044,7 +3044,7 @@ const generatePreviewWithLocalComfyImage = async (payload) => {
     return {
       imageUrl: `data:image/png;base64,${output.toString("base64")}`,
       mimeType: "image/png",
-      model: "Local ComfyUI SDXL image-to-image preview"
+      model: "Preview locale"
     };
   } finally {
     await rm(inputPath, { force: true }).catch(() => {});
@@ -3059,8 +3059,8 @@ const generatePreviewWithDynamicStableHairReference = async (payload) => {
     imageUrl: `data:image/png;base64,${output.toString("base64")}`,
     mimeType: "image/png",
     model: reference.fromCache
-      ? "Local cached Stable-Hair reference preview"
-      : "Local ComfyUI generated Stable-Hair reference preview",
+      ? "Reference locale en cache"
+      : "Reference locale generee",
     referenceCacheKey: reference.key
   };
 };
@@ -3082,7 +3082,7 @@ const generatePreviewWithAiHorde = async (payload) => {
   return {
     imageUrl,
     mimeType: imageUrl.startsWith("data:image/") ? imageUrl.slice(5, imageUrl.indexOf(";")) : "image/webp",
-    model: `AI Horde: ${getAiHordeModels().join(", ")}`
+    model: "Generation communautaire"
   };
 };
 
@@ -3098,7 +3098,7 @@ const getServerImageProvider = () =>
 const generateServerImage = async (payload) => {
   const provider = getServerImageProvider();
   if (provider === "fal-kontext" || provider === "fal") {
-    throw Object.assign(new Error("FAL est desactive: la chaine doit rester gratuite."), { status: 403 });
+    throw Object.assign(new Error("Ce service image est desactive: la chaine doit rester gratuite."), { status: 403 });
   }
   if (provider === "free-chain") {
     try {
@@ -3131,7 +3131,7 @@ const generateServerImage = async (payload) => {
   }
   if (provider === "gemini" || provider === "server" || !provider) return generateWithGemini(payload);
 
-  throw Object.assign(new Error(`Provider image serveur inconnu: ${provider}`), { status: 400 });
+  throw Object.assign(new Error(`Service image serveur inconnu: ${provider}`), { status: 400 });
 };
 
 const handleApi = async (req, res) => {
@@ -3166,23 +3166,23 @@ const handleApi = async (req, res) => {
       localComfyAvailable,
       localStableHairAvailable,
       freeGenerators: [
-        "Local Stable-Hair dynamic recipe references + landmark face restore (final generation)",
-        "Local ComfyUI InstantID (final short-hair identity generation)",
-        "Local ComfyUI PhotoMaker + OpenPose (final short-hair identity generation)",
-        "Local ComfyUI SDXL masked inpaint (final image-to-image)",
-        "AI Horde anonymous inpainting (final image-to-image fallback)",
-        "Local ComfyUI SDXL image-to-image (preview cards with uploaded photo)",
-        "Local ComfyUI SDXL text-to-image (preview fallback without photo)",
-        "Local SVG hairstyle previews (preview fallback)"
+        "References dynamiques locales pour resultat final",
+        "Generation locale de coupes courtes",
+        "Generation locale avec pose guidee",
+        "Retouche locale masquee",
+        "Fallback communautaire anonyme",
+        "Preview locale avec photo chargee",
+        "Preview locale sans photo",
+        "Previews vectorielles locales"
       ],
       imageModel: provider === "fal-kontext"
-        ? "FAL disabled"
+        ? "Service desactive"
         : provider === "free-chain" || provider === "ai-horde"
           ? localStableHairAvailable
-            ? "Local Stable-Hair dynamic recipe references + landmark face restore + local/anonymous fallbacks"
+            ? "Chaine locale avec fallbacks"
             : localComfyAvailable
-              ? "Local ComfyUI InstantID/PhotoMaker for short hair + SDXL masked inpaint + AI Horde fallback"
-            : `AI Horde inpainting: ${getAiHordeModels().join(", ")}`
+              ? "Chaine locale de retouche et generation"
+            : "Fallback communautaire"
         : process.env.GEMINI_IMAGE_MODEL || process.env.VITE_GEMINI_IMAGE_MODEL || DEFAULT_IMAGE_MODEL
     });
     return true;
@@ -3197,7 +3197,7 @@ const handleApi = async (req, res) => {
       const status = error.status || (error.message === "IMAGE_TOO_LARGE" ? 413 : 500);
       sendJson(res, status, {
         ok: false,
-        error: error.message || "Erreur image-to-image."
+        error: error.message || "Erreur de retouche photo."
       });
     }
     return true;
@@ -3227,7 +3227,7 @@ const handleApi = async (req, res) => {
       const status = error.status || (error.message === "IMAGE_TOO_LARGE" ? 413 : 500);
       sendJson(res, status, {
         ok: false,
-        error: error.message || "Generation Alibaba impossible."
+        error: error.message || "Generation image impossible."
       });
     }
     return true;
@@ -3242,7 +3242,7 @@ const handleApi = async (req, res) => {
       const status = error.status || (error.message === "IMAGE_TOO_LARGE" ? 413 : 500);
       sendJson(res, status, {
         ok: false,
-        error: error.message || "Generation OpenAI impossible.",
+        error: error.message || "Generation image impossible.",
         quota: error.quota,
         allowCodeActivation: Boolean(error.allowCodeActivation)
       });
@@ -3300,7 +3300,7 @@ const handleApi = async (req, res) => {
       const status = error.status || (error.message === "IMAGE_TOO_LARGE" ? 413 : 500);
       sendJson(res, status, {
         ok: false,
-        error: error.message || "Resultat OpenAI impossible."
+        error: error.message || "Resultat image impossible."
       });
     }
     return true;
@@ -3390,7 +3390,7 @@ const serveGeneratedOpenAiAsset = async (req, res) => {
     });
     res.end(data);
   } catch {
-    sendJson(res, 404, { ok: false, error: "Image OpenAI generee introuvable." });
+    sendJson(res, 404, { ok: false, error: "Image generee introuvable." });
   }
 
   return true;
