@@ -3183,7 +3183,7 @@ const handleApi = async (req, res) => {
             : localComfyAvailable
               ? "Chaine locale de retouche et generation"
             : "Fallback communautaire"
-        : process.env.GEMINI_IMAGE_MODEL || process.env.VITE_GEMINI_IMAGE_MODEL || DEFAULT_IMAGE_MODEL
+        : "Service image principal"
     });
     return true;
   }
