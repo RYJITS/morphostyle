@@ -574,15 +574,15 @@ const App: React.FC = () => {
 
   const topRightBack =
     state === AppState.CONSULTATION
-      ? { label: 'Accueil', action: resetExperience }
+      ? { label: 'Retour', action: resetExperience }
       : state === AppState.SELECTION
-        ? { label: 'Consultation', action: returnToConsultation }
+        ? { label: 'Retour', action: returnToConsultation }
         : state === AppState.ANALYZING
-          ? { label: 'Consultation', action: returnFromLoading }
+          ? { label: 'Retour', action: returnFromLoading }
           : state === AppState.GENERATING
-            ? { label: 'Recommandations', action: returnFromLoading }
+            ? { label: 'Retour', action: returnFromLoading }
             : state === AppState.RESULTS
-              ? { label: 'Recommandations', action: returnToSelection }
+              ? { label: 'Retour', action: returnToSelection }
               : null;
 
   const startExampleConsultation = (example: DemoExample) => {
