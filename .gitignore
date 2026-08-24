@@ -80,6 +80,8 @@ public/demo-profiles/*/recommendation-boards/
 public/demo-profiles/*/recommendation-previews/*.png
 public/demo-profiles/*/final-views/*.png
 server/data/openai-daily-usage.json
+server/data/public-generations.json
+server/data/public-gallery/
 docs/daily-tests/evidence/
 *.zip
 *.7z

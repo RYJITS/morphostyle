@@ -85,6 +85,18 @@ export interface Proposal {
   isPreparedAsset?: boolean;
 }
 
+export interface PublicGeneration {
+  id: string;
+  imageUrl: string;
+  styleName: string;
+  color: string;
+  faceShape: string;
+  sourceLabel: string;
+  createdAt: string;
+  additionalViews?: AdditionalViews;
+  consultation?: Partial<ConsultationData>;
+}
+
 export enum AppState {
   IDLE = 'IDLE',
   CONSULTATION = 'CONSULTATION',

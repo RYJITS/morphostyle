@@ -33,6 +33,8 @@ const GENERATED_ALIBABA_DIR = path.join(rootDir, "public", "generated-alibaba");
 const GENERATED_OPENAI_DIR = path.join(rootDir, "public", "generated-openai");
 const OPENAI_USAGE_DIR = path.join(rootDir, "server", "data");
 const OPENAI_USAGE_FILE = path.join(OPENAI_USAGE_DIR, "openai-daily-usage.json");
+const PUBLIC_GENERATIONS_FILE = path.join(OPENAI_USAGE_DIR, "public-generations.json");
+const PUBLIC_GALLERY_DIR = path.join(OPENAI_USAGE_DIR, "public-gallery");
 const OPENAI_DAILY_TRIAL_LIMIT = Math.max(1, Number(process.env.OPENAI_DAILY_TRIAL_LIMIT || 1));
 const OPENAI_QUOTA_TIME_ZONE = process.env.OPENAI_QUOTA_TIME_ZONE || "Europe/Zurich";
 const DEFAULT_OPENAI_EXTRA_TRIAL_CODE_HASHES = [
@@ -128,6 +130,136 @@ const stripDataUrl = (value = "") => {
   const match = String(value).match(/^data:([^;]+);base64,(.+)$/);
   if (match) return { data: match[2], mimeType: match[1] };
   return { data: String(value), mimeType: "" };
+};
+
+const clampText = (value = "", max = 120) =>
+  String(value || "")
+    .replace(/[\u0000-\u001F\u007F]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, max);
+
+const isPublishableAssetUrl = (value = "") => {
+  const url = String(value || "").trim();
+  if (!url || url.includes("\\") || url.includes("..")) return false;
+  return [
+    "/public-gallery/",
+    "/generated-openai/",
+    "/generated-alibaba/",
+    "/demo-profiles/"
+  ].some(prefix => url.startsWith(prefix));
+};
+
+const resolvePublishableAssetPath = (assetUrl = "") => {
+  const parsedUrl = new URL(String(assetUrl || ""), "http://local");
+  const requestedPath = decodeURIComponent(parsedUrl.pathname);
+  const pathMap = [
+    ["/public-gallery/", PUBLIC_GALLERY_DIR],
+    ["/generated-openai/", GENERATED_OPENAI_DIR],
+    ["/generated-alibaba/", GENERATED_ALIBABA_DIR],
+    ["/demo-profiles/", path.join(rootDir, "public", "demo-profiles")]
+  ];
+
+  for (const [prefix, baseDir] of pathMap) {
+    if (!requestedPath.startsWith(prefix)) continue;
+    const relativePath = requestedPath.replace(prefix, "");
+    const safePath = path.normalize(relativePath).replace(/^(\.\.[/\\])+/, "");
+    const filePath = path.join(baseDir, safePath);
+    if (filePath.startsWith(baseDir)) return filePath;
+  }
+
+  return "";
+};
+
+const sanitizePublicViews = (views = {}) => {
+  const result = {};
+  for (const key of ["left", "right", "back"]) {
+    const url = String(views?.[key] || "").trim();
+    if (isPublishableAssetUrl(url)) result[key] = url;
+  }
+  return result;
+};
+
+const readPublicGenerations = async () => {
+  try {
+    const parsed = JSON.parse(await readFile(PUBLIC_GENERATIONS_FILE, "utf8"));
+    if (Array.isArray(parsed)) return parsed;
+    if (Array.isArray(parsed?.generations)) return parsed.generations;
+  } catch {
+    // Missing or invalid public gallery: start empty.
+  }
+  return [];
+};
+
+const writePublicGenerations = async (generations) => {
+  await mkdir(OPENAI_USAGE_DIR, { recursive: true });
+  await writeFile(PUBLIC_GENERATIONS_FILE, `${JSON.stringify(generations.slice(0, 80), null, 2)}\n`, "utf8");
+};
+
+const normalizePublicGenerationPayload = (payload = {}) => {
+  const proposal = payload.proposal || {};
+  const imageUrl = String(proposal.imageUrl || "").trim();
+  if (!isPublishableAssetUrl(imageUrl)) {
+    throw Object.assign(new Error("Cette image ne peut pas etre publiee dans la vitrine. Telechargez-la localement si besoin."), { status: 400 });
+  }
+
+  const consultation = payload.consultation || {};
+  const additionalViews = sanitizePublicViews(proposal.additionalViews);
+
+  return {
+    id: `${Date.now().toString(36)}-${createHash("sha1").update(`${imageUrl}-${proposal.styleName || ""}`).digest("hex").slice(0, 10)}`,
+    imageUrl,
+    styleName: clampText(proposal.styleName || "Resultat visagiste", 80),
+    color: clampText(proposal.color || "Naturel", 40),
+    faceShape: clampText(payload.analysis?.faceShape || proposal.faceShape || "Morphologie personnalisee", 70),
+    sourceLabel: clampText(payload.sourceLabel || "Photo personnelle", 50),
+    createdAt: new Date().toISOString(),
+    additionalViews: Object.keys(additionalViews).length ? additionalViews : undefined,
+    consultation: {
+      targetLength: clampText(consultation.targetLength || "", 16),
+      maintenance: clampText(consultation.maintenance || "", 16),
+      lifestyle: clampText(consultation.lifestyle || "", 16),
+      ageGroup: clampText(consultation.ageGroup || "", 16),
+      gender: clampText(consultation.gender || "", 16)
+    }
+  };
+};
+
+const copyPublicGalleryAsset = async (assetUrl, generationId, label) => {
+  if (String(assetUrl || "").startsWith("/public-gallery/")) return assetUrl;
+
+  const sourcePath = resolvePublishableAssetPath(assetUrl);
+  if (!sourcePath) return assetUrl;
+
+  const extension = path.extname(sourcePath).toLowerCase() || ".jpg";
+  const safeLabel = String(label || "image").replace(/[^a-z0-9_-]+/gi, "-").slice(0, 30) || "image";
+  const filename = `${generationId}-${safeLabel}${extension}`;
+  await mkdir(PUBLIC_GALLERY_DIR, { recursive: true });
+  await writeFile(path.join(PUBLIC_GALLERY_DIR, filename), await readFile(sourcePath));
+  return `/public-gallery/${filename}`;
+};
+
+const materializePublicGenerationAssets = async (generation) => {
+  const imageUrl = await copyPublicGalleryAsset(generation.imageUrl, generation.id, "front");
+  const additionalViews = {};
+  for (const [view, url] of Object.entries(generation.additionalViews || {})) {
+    additionalViews[view] = await copyPublicGalleryAsset(url, generation.id, view);
+  }
+
+  return {
+    ...generation,
+    imageUrl,
+    additionalViews: Object.keys(additionalViews).length ? additionalViews : undefined
+  };
+};
+
+const addPublicGeneration = async (payload) => {
+  const generation = await materializePublicGenerationAssets(normalizePublicGenerationPayload(payload));
+  const generations = await readPublicGenerations();
+  const withoutDuplicate = generations.filter(item => item.imageUrl !== generation.imageUrl);
+  const next = [generation, ...withoutDuplicate].slice(0, 80);
+  await writePublicGenerations(next);
+  return generation;
 };
 
 const detectMimeType = (base64, fallback = "") => {
@@ -3132,6 +3264,33 @@ const handleApi = async (req, res) => {
     return true;
   }
 
+  if (req.method === "GET" && req.url === "/api/public-generations") {
+    try {
+      const generations = await readPublicGenerations();
+      sendJson(res, 200, { ok: true, generations: generations.slice(0, 48) });
+    } catch (error) {
+      sendJson(res, 500, {
+        ok: false,
+        error: error.message || "Historique public indisponible."
+      });
+    }
+    return true;
+  }
+
+  if (req.method === "POST" && req.url === "/api/public-generations") {
+    try {
+      const payload = await readJsonBody(req);
+      const generation = await addPublicGeneration(payload);
+      sendJson(res, 200, { ok: true, generation });
+    } catch (error) {
+      sendJson(res, error.status || 500, {
+        ok: false,
+        error: error.message || "Publication vitrine impossible."
+      });
+    }
+    return true;
+  }
+
   if (req.method === "POST" && req.url === "/api/openai-selected-result") {
     try {
       const payload = await readJsonBody(req);
@@ -3174,6 +3333,35 @@ const serveGeneratedAlibabaAsset = async (req, res) => {
     res.end(data);
   } catch {
     sendJson(res, 404, { ok: false, error: "Image generee introuvable." });
+  }
+
+  return true;
+};
+
+const servePublicGalleryAsset = async (req, res) => {
+  const parsedUrl = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
+  const requestedPath = decodeURIComponent(parsedUrl.pathname);
+  if (!requestedPath.startsWith("/public-gallery/")) return false;
+
+  const relativePath = requestedPath.replace(/^\/public-gallery\//, "");
+  const safePath = path.normalize(relativePath).replace(/^(\.\.[/\\])+/, "");
+  const filePath = path.join(PUBLIC_GALLERY_DIR, safePath);
+
+  if (!filePath.startsWith(PUBLIC_GALLERY_DIR)) {
+    res.writeHead(403);
+    res.end("Forbidden");
+    return true;
+  }
+
+  try {
+    const data = await readFile(filePath);
+    res.writeHead(200, {
+      "Content-Type": mimeByExt.get(path.extname(filePath)) || "application/octet-stream",
+      "Cache-Control": "public, max-age=31536000, immutable"
+    });
+    res.end(data);
+  } catch {
+    sendJson(res, 404, { ok: false, error: "Image vitrine introuvable." });
   }
 
   return true;
@@ -3249,6 +3437,7 @@ export const handleMorphoStyleRequest = async (req, res) => {
 
   if (await handleApi(req, res)) return;
   if (req.method === "GET" || req.method === "HEAD") {
+    if (await servePublicGalleryAsset(req, res)) return;
     if (await serveGeneratedAlibabaAsset(req, res)) return;
     if (await serveGeneratedOpenAiAsset(req, res)) return;
     await serveStatic(req, res);

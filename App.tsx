@@ -1,14 +1,15 @@
 
-import React, { useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import Header from './components/Header';
-import { AppState, AnalysisResult, Proposal, ConsultationData } from './types';
-import { analyzeMorphology, generateHairstyleImage, generateStyleAngles, generateQuickPreview, generateOpenAiUploadRecommendations, generateOpenAiSelectedResult, activateOpenAiTrialCode, isOpenAiUploadStyle, isFreeImageApiMode, isImageToImageMode, isPuterFluxImageToImageMode, isHuggingFaceKontextImageToImageMode, isLocalRetouchImageToImageMode, createLocalPreviewFallback, createLocalExampleAnalysis } from './services/geminiService';
+import { AppState, AnalysisResult, Proposal, ConsultationData, PublicGeneration } from './types';
+import { analyzeMorphology, generateHairstyleImage, generateStyleAngles, generateQuickPreview, generateOpenAiUploadRecommendations, generateOpenAiSelectedResult, activateOpenAiTrialCode, fetchPublicGenerations, publishPublicGeneration, isOpenAiUploadStyle, isFreeImageApiMode, isImageToImageMode, isPuterFluxImageToImageMode, isHuggingFaceKontextImageToImageMode, isLocalRetouchImageToImageMode, createLocalPreviewFallback, createLocalExampleAnalysis } from './services/geminiService';
 import { DEMO_EXAMPLES, DemoExample } from './services/demoExamples';
 import { getPreparedCombinationBoardUrl, getPreparedProfileStyles, hasPreparedCombination, hasPreparedLookDatabase } from './services/profileLookDatabase';
 import { 
   Loader2, Sparkles, ArrowLeft, AlertTriangle, X, ChevronRight, 
   RotateCcw, CheckCircle2, Maximize2, User, Info,
-  Baby, GraduationCap, Briefcase, Glasses, Users, Upload
+  Baby, GraduationCap, Briefcase, Glasses, Users, Upload,
+  Download, Globe2, ImagePlus, Images
 } from 'lucide-react';
 
 const genderLabels: Record<ConsultationData["gender"], string> = {
@@ -66,6 +67,11 @@ const App: React.FC = () => {
   const [isActivatingTrialCode, setIsActivatingTrialCode] = useState(false);
   const [zoomImage, setZoomImage] = useState<string | null>(null);
   const [selectedExampleId, setSelectedExampleId] = useState<string | null>(null);
+  const [publicGenerations, setPublicGenerations] = useState<PublicGeneration[]>([]);
+  const [dailyResults, setDailyResults] = useState<PublicGeneration[]>([]);
+  const [isPublicGalleryLoading, setIsPublicGalleryLoading] = useState(false);
+  const [publishingProposalId, setPublishingProposalId] = useState<string | null>(null);
+  const [publishedProposalIds, setPublishedProposalIds] = useState<string[]>([]);
   const activeOperationRef = useRef(0);
   const uploadInputRef = useRef<HTMLInputElement | null>(null);
   const freeImageApiMode = isFreeImageApiMode();
@@ -114,6 +120,50 @@ const App: React.FC = () => {
         ? 'Image source'
         : 'Reference active';
   const demographicsLocked = !!selectedExample;
+  const dailyResultsStorageKey = "morphostyle_daily_results_v1";
+  const todayKey = () => new Intl.DateTimeFormat("en-CA").format(new Date());
+
+  const loadDailyResults = () => {
+    try {
+      const parsed = JSON.parse(window.localStorage.getItem(dailyResultsStorageKey) || "{}");
+      return parsed?.date === todayKey() && Array.isArray(parsed.results)
+        ? parsed.results as PublicGeneration[]
+        : [];
+    } catch {
+      return [];
+    }
+  };
+
+  const saveDailyResults = (results: PublicGeneration[]) => {
+    try {
+      window.localStorage.setItem(dailyResultsStorageKey, JSON.stringify({
+        date: todayKey(),
+        results: results.slice(0, 48)
+      }));
+    } catch {
+      // Daily history is a convenience feature; generation must keep working if storage is full.
+    }
+  };
+
+  useEffect(() => {
+    let mounted = true;
+    setDailyResults(loadDailyResults());
+    setIsPublicGalleryLoading(true);
+    fetchPublicGenerations()
+      .then(generations => {
+        if (mounted) setPublicGenerations(generations);
+      })
+      .catch(() => {
+        if (mounted) setPublicGenerations([]);
+      })
+      .finally(() => {
+        if (mounted) setIsPublicGalleryLoading(false);
+      });
+
+    return () => {
+      mounted = false;
+    };
+  }, []);
 
   const isTrialQuotaError = (err: any, message: string) =>
     Boolean(err?.allowCodeActivation) || /essai openai du jour|essai du jour|quota quotidien/i.test(message);
@@ -153,6 +203,82 @@ const App: React.FC = () => {
       setTrialCodeMessage(err?.message || "Activation du code impossible.");
     } finally {
       setIsActivatingTrialCode(false);
+    }
+  };
+
+  const imageFileName = (label: string, suffix = "face") =>
+    `${label || "morphostyle"}-${suffix}`
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .replace(/[^a-z0-9]+/gi, "-")
+      .replace(/^-+|-+$/g, "")
+      .toLowerCase()
+      .slice(0, 70) || "morphostyle-resultat";
+
+  const imageDownloadName = (label: string, suffix: string, url = "") => {
+    const extension = String(url).match(/\.(png|webp|jpg|jpeg)(?:$|\?)/i)?.[1]?.toLowerCase() || "jpg";
+    return `${imageFileName(label, suffix)}.${extension === "jpeg" ? "jpg" : extension}`;
+  };
+
+  const dailyGenerationFromProposal = (
+    proposal: Proposal,
+    analysisInput = analysis,
+    consultationInput = consultation,
+    sourceLabel = selectedExample ? selectedExample.name : "Photo personnelle"
+  ): PublicGeneration | null => {
+    if (!analysisInput) return null;
+
+    return {
+      id: `${Date.now().toString(36)}-${proposal.id}-${Math.random().toString(36).slice(2, 7)}`,
+      imageUrl: proposal.imageUrl,
+      styleName: proposal.styleName,
+      color: proposal.color,
+      faceShape: analysisInput.faceShape,
+      sourceLabel,
+      createdAt: new Date().toISOString(),
+      additionalViews: proposal.additionalViews,
+      consultation: consultationInput
+    };
+  };
+
+  const rememberDailyProposals = (
+    items: Proposal[],
+    analysisInput = analysis,
+    consultationInput = consultation,
+    sourceLabel = selectedExample ? selectedExample.name : "Photo personnelle"
+  ) => {
+    const entries = items
+      .map(item => dailyGenerationFromProposal(item, analysisInput, consultationInput, sourceLabel))
+      .filter((item): item is PublicGeneration => Boolean(item));
+    if (!entries.length) return;
+
+    setDailyResults(prev => {
+      const merged = [
+        ...entries,
+        ...prev.filter(item => !entries.some(entry => entry.imageUrl === item.imageUrl))
+      ].slice(0, 48);
+      saveDailyResults(merged);
+      return merged;
+    });
+  };
+
+  const publishProposal = async (proposal: Proposal) => {
+    if (!analysis) return;
+    setPublishingProposalId(proposal.id);
+    try {
+      const generation = await publishPublicGeneration({
+        proposal,
+        analysis,
+        consultation,
+        sourceLabel: selectedExample ? selectedExample.name : "Photo personnelle"
+      });
+      setPublicGenerations(prev => [generation, ...prev.filter(item => item.id !== generation.id && item.imageUrl !== generation.imageUrl)].slice(0, 48));
+      setPublishedProposalIds(prev => prev.includes(proposal.id) ? prev : [...prev, proposal.id]);
+      setNotice("Resultat ajoute a la vitrine publique.");
+    } catch (err: any) {
+      showServiceError(err, "Publication vitrine impossible.");
+    } finally {
+      setPublishingProposalId(null);
     }
   };
 
@@ -210,7 +336,6 @@ const App: React.FC = () => {
 
   const returnToSelection = () => {
     cancelActiveOperation();
-    setProposals([]);
     setZoomImage(null);
     clearServiceAlert();
     setState(analysis ? AppState.SELECTION : AppState.CONSULTATION);
@@ -313,6 +438,7 @@ const App: React.FC = () => {
     setAnalysis(null);
     setSelectedStyles([]);
     setProposals([]);
+    setPublishedProposalIds([]);
     clearServiceAlert();
     setZoomImage(null);
   };
@@ -337,6 +463,7 @@ const App: React.FC = () => {
     setAnalysis(null);
     setProposals([]);
     setSelectedStyles([]);
+    setPublishedProposalIds([]);
     setSelectedExampleId(example.id);
     setConsultation(example.consultation);
     setUserImage(example.sourceImage);
@@ -365,6 +492,7 @@ const App: React.FC = () => {
       setAnalysis(null);
       setProposals([]);
       setSelectedStyles([]);
+      setPublishedProposalIds([]);
       setSelectedExampleId(null);
       setUserImage(reader.result as string);
       setConsultation(prev => ({
@@ -389,6 +517,7 @@ const App: React.FC = () => {
     setUserImage(example.sourceImage);
     setSelectedStyles([]);
     setProposals([]);
+    setPublishedProposalIds([]);
 
     try {
       setState(AppState.ANALYZING);
@@ -416,7 +545,7 @@ const App: React.FC = () => {
       setLoadingStep(`Creation du resultat final local : ${finalStyle.name}...`);
       const imageUrl = finalStyle.resultImageUrl || await generateHairstyleImage(example.sourceImage, finalStyle, example.consultation.gender, 'front', example.consultation.ageGroup);
       if (!isCurrentOperation(operationId)) return;
-      setProposals([{
+      const exampleProposal = {
         id: finalStyle.id,
         imageUrl,
         styleName: finalStyle.name,
@@ -426,7 +555,9 @@ const App: React.FC = () => {
         beardStyle: finalStyle.beardStyle,
         additionalViews: finalStyle.additionalViews,
         isPreparedAsset: finalStyle.isPreparedAsset
-      }]);
+      };
+      setProposals([exampleProposal]);
+      rememberDailyProposals([exampleProposal], result, example.consultation, example.name);
       setState(AppState.RESULTS);
       scrollToTop();
     } catch (err: any) {
@@ -451,6 +582,7 @@ const App: React.FC = () => {
     setState(AppState.GENERATING);
     const chosenStyles = analysis.recommendedStyles.filter(s => selectedStyles.includes(s.id));
     const newProposals: Proposal[] = [];
+    setPublishedProposalIds([]);
 
     try {
       for (let i = 0; i < chosenStyles.length; i++) {
@@ -486,6 +618,7 @@ const App: React.FC = () => {
       if (newProposals.length === 0) throw new Error("Génération impossible sur cette photo.");
       
       setProposals(newProposals);
+      rememberDailyProposals(newProposals);
       setState(AppState.RESULTS);
       scrollToTop();
     } catch (err: any) {
@@ -609,6 +742,113 @@ const App: React.FC = () => {
     </>
   );
 
+  const DailyGenerationGallery = () => {
+    if (dailyResults.length === 0) return null;
+
+    return (
+      <section className="mx-auto mt-14 max-w-6xl text-left animate-in fade-in slide-in-from-bottom-4 duration-500" aria-label="Mes resultats du jour">
+        <div className="mb-5 flex flex-col gap-3 px-2 sm:flex-row sm:items-end sm:justify-between">
+          <div>
+            <div className="mb-2 inline-flex items-center gap-2 rounded-full bg-black px-3 py-1 text-[10px] font-black uppercase tracking-widest text-white shadow-sm">
+              <Images className="h-3.5 w-3.5 text-rose-300" />
+              Mes resultats du jour
+            </div>
+            <h2 className="serif text-3xl font-bold text-gray-950">Historique personnel</h2>
+          </div>
+          <div className="text-[10px] font-black uppercase tracking-widest text-gray-400">
+            {dailyResults.length} resultat{dailyResults.length > 1 ? "s" : ""}
+          </div>
+        </div>
+
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6">
+          {dailyResults.slice(0, 12).map(item => (
+            <button
+              key={item.id}
+              type="button"
+              onClick={() => setZoomImage(item.imageUrl)}
+              className="group cursor-pointer overflow-hidden rounded-2xl border border-gray-100 bg-white text-left shadow-sm transition-all duration-200 hover:-translate-y-1 hover:border-rose-200 hover:shadow-xl focus:outline-none focus:ring-4 focus:ring-rose-100"
+            >
+              <div className="aspect-[3/4] overflow-hidden bg-gray-100">
+                <img
+                  src={item.imageUrl}
+                  alt={item.styleName}
+                  loading="lazy"
+                  className="h-full w-full object-cover transition-transform duration-500 group-hover:scale-105"
+                  onError={(event) => {
+                    event.currentTarget.onerror = null;
+                    event.currentTarget.src = createLocalPreviewFallback(item);
+                  }}
+                />
+              </div>
+              <div className="p-3">
+                <div className="truncate text-xs font-black text-gray-950">{item.styleName}</div>
+                <div className="mt-1 text-[9px] font-black uppercase tracking-widest text-gray-400">{item.sourceLabel}</div>
+              </div>
+            </button>
+          ))}
+        </div>
+      </section>
+    );
+  };
+
+  const PublicGenerationGallery = () => {
+    if (!isPublicGalleryLoading && publicGenerations.length === 0) return null;
+
+    return (
+      <section className="mx-auto mt-14 max-w-6xl text-left animate-in fade-in slide-in-from-bottom-4 duration-500" aria-label="Vitrine publique">
+        <div className="mb-5 flex flex-col gap-3 px-2 sm:flex-row sm:items-end sm:justify-between">
+          <div>
+            <div className="mb-2 inline-flex items-center gap-2 rounded-full bg-white px-3 py-1 text-[10px] font-black uppercase tracking-widest text-rose-600 shadow-sm ring-1 ring-rose-100">
+              <Globe2 className="h-3.5 w-3.5" />
+              Vitrine publique
+            </div>
+            <h2 className="serif text-3xl font-bold text-gray-950">Dernieres generations</h2>
+          </div>
+          {publicGenerations.length > 0 && (
+            <div className="text-[10px] font-black uppercase tracking-widest text-gray-400">
+              {publicGenerations.length} resultat{publicGenerations.length > 1 ? "s" : ""}
+            </div>
+          )}
+        </div>
+
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6">
+          {isPublicGalleryLoading && publicGenerations.length === 0
+            ? Array.from({ length: 6 }).map((_, index) => (
+              <div key={index} className="aspect-[3/4] animate-pulse rounded-2xl bg-gray-100" />
+            ))
+            : publicGenerations.slice(0, 12).map(item => (
+              <button
+                key={item.id}
+                type="button"
+                onClick={() => setZoomImage(item.imageUrl)}
+                className="group cursor-pointer overflow-hidden rounded-2xl border border-gray-100 bg-white text-left shadow-sm transition-all duration-200 hover:-translate-y-1 hover:border-rose-200 hover:shadow-xl focus:outline-none focus:ring-4 focus:ring-rose-100"
+              >
+                <div className="aspect-[3/4] overflow-hidden bg-gray-100">
+                  <img
+                    src={item.imageUrl}
+                    alt={item.styleName}
+                    loading="lazy"
+                    className="h-full w-full object-cover transition-transform duration-500 group-hover:scale-105"
+                    onError={(event) => {
+                      event.currentTarget.onerror = null;
+                      event.currentTarget.src = createLocalPreviewFallback(item);
+                    }}
+                  />
+                </div>
+                <div className="p-3">
+                  <div className="truncate text-xs font-black text-gray-950">{item.styleName}</div>
+                  <div className="mt-1 flex items-center gap-1.5 text-[9px] font-black uppercase tracking-widest text-gray-400">
+                    <Images className="h-3 w-3" />
+                    {item.sourceLabel}
+                  </div>
+                </div>
+              </button>
+            ))}
+        </div>
+      </section>
+    );
+  };
+
   return (
     <div className="min-h-screen flex flex-col bg-[#FDFCFB]">
       <Header />
@@ -672,10 +912,14 @@ const App: React.FC = () => {
         )}
 
         {state === AppState.IDLE && (
-          <div className="max-w-3xl mx-auto text-center py-12 animate-in fade-in duration-1000">
-            <h1 className="serif text-5xl md:text-6xl font-bold text-gray-900 mb-5">Expertise <span className="text-rose-600 italic">Visagiste</span></h1>
-            <p className="text-sm text-gray-500 mb-10 max-w-xl mx-auto">Chargez une photo ou selectionnez un profil exemple.</p>
-            <DemoExampleGallery />
+          <div className="mx-auto max-w-6xl py-12 text-center animate-in fade-in duration-1000">
+            <div className="mx-auto max-w-3xl">
+              <h1 className="serif text-5xl md:text-6xl font-bold text-gray-900 mb-5">Expertise <span className="text-rose-600 italic">Visagiste</span></h1>
+              <p className="text-sm text-gray-500 mb-10 max-w-xl mx-auto">Chargez une photo ou selectionnez un profil exemple.</p>
+              <DemoExampleGallery />
+            </div>
+            <DailyGenerationGallery />
+            <PublicGenerationGallery />
           </div>
         )}
 
@@ -834,6 +1078,21 @@ const App: React.FC = () => {
                 </div>
               )}
               </StepHeader>
+              {proposals.length > 0 && (
+                <div className="mx-auto -mt-4 mb-8 flex max-w-lg justify-center">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setState(AppState.RESULTS);
+                      scrollToTop();
+                    }}
+                    className="inline-flex min-h-11 cursor-pointer items-center justify-center gap-2 rounded-full bg-black px-5 py-2 text-xs font-black uppercase tracking-widest text-white shadow-xl transition-all hover:bg-gray-800 focus:outline-none focus:ring-4 focus:ring-rose-100"
+                  >
+                    <Images className="h-4 w-4 text-rose-300" />
+                    Revoir le resultat genere
+                  </button>
+                </div>
+              )}
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-8 max-w-6xl mx-auto">
@@ -1000,6 +1259,23 @@ const App: React.FC = () => {
                           </div>
                         )}
 
+                        {p.additionalViews && (
+                          <div className="mb-6 flex flex-wrap justify-center gap-2">
+                            {Object.entries(p.additionalViews).map(([k, url]) => (
+                              <a
+                                key={`${p.id}-${k}-download`}
+                                href={url}
+                                download={imageDownloadName(p.styleName, k, url)}
+                                onClick={(event) => event.stopPropagation()}
+                                className="inline-flex min-h-10 cursor-pointer items-center justify-center gap-2 rounded-xl border border-gray-100 bg-white px-3 text-[10px] font-black uppercase tracking-widest text-gray-500 shadow-sm transition-all hover:border-rose-200 hover:text-rose-600 focus:outline-none focus:ring-4 focus:ring-rose-100"
+                              >
+                                <Download className="h-3.5 w-3.5" />
+                                {k === 'back' ? 'Dos' : k === 'left' ? 'Gauche' : 'Droite'}
+                              </a>
+                            ))}
+                          </div>
+                        )}
+
                         <div className="mb-6">
                           <h3 className="serif text-3xl font-bold mb-3">{p.styleName}</h3>
                           <div className="flex flex-wrap gap-2 mb-4">
@@ -1009,6 +1285,30 @@ const App: React.FC = () => {
                             )}
                           </div>
                           <p className="text-gray-400 text-sm italic leading-relaxed font-light">"{p.whyItWorks}"</p>
+                        </div>
+
+                        <div className="mb-5 grid grid-cols-1 gap-3 sm:grid-cols-2">
+                          <a
+                            href={p.imageUrl}
+                            download={imageDownloadName(p.styleName, "face", p.imageUrl)}
+                            onClick={(event) => event.stopPropagation()}
+                            className="inline-flex min-h-12 cursor-pointer items-center justify-center gap-2 rounded-2xl border border-gray-100 bg-white px-4 text-xs font-black uppercase tracking-widest text-gray-700 shadow-sm transition-all hover:border-rose-200 hover:text-rose-600 focus:outline-none focus:ring-4 focus:ring-rose-100"
+                          >
+                            <Download className="h-4 w-4" />
+                            Telecharger
+                          </a>
+                          <button
+                            type="button"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              publishProposal(p);
+                            }}
+                            disabled={publishingProposalId === p.id || publishedProposalIds.includes(p.id)}
+                            className="inline-flex min-h-12 cursor-pointer items-center justify-center gap-2 rounded-2xl bg-black px-4 text-xs font-black uppercase tracking-widest text-white shadow-sm transition-all hover:bg-gray-800 disabled:cursor-default disabled:bg-emerald-600 disabled:opacity-90 focus:outline-none focus:ring-4 focus:ring-rose-100"
+                          >
+                            {publishingProposalId === p.id ? <Loader2 className="h-4 w-4 animate-spin" /> : publishedProposalIds.includes(p.id) ? <CheckCircle2 className="h-4 w-4" /> : <ImagePlus className="h-4 w-4 text-rose-300" />}
+                            {publishedProposalIds.includes(p.id) ? "Publie" : "Publier vitrine"}
+                          </button>
                         </div>
                         
                         {!freeImageApiMode && !hfKontextMode && !p.additionalViews && !p.isPreparedAsset && (

@@ -1,5 +1,5 @@
 import { GoogleGenAI, Type } from "@google/genai";
-import { AnalysisResult, ConsultationData, AdditionalViews, HairstyleRecipe, StyleRecommendation } from "../types";
+import { AnalysisResult, ConsultationData, AdditionalViews, HairstyleRecipe, Proposal, PublicGeneration, StyleRecommendation } from "../types";
 
 const MAX_RETRIES = 2;
 const INITIAL_DELAY = 1500;
@@ -17,6 +17,7 @@ const ALIBABA_UPLOAD_RECOMMENDATIONS_ENDPOINT = process.env.ALIBABA_UPLOAD_RECOM
 const OPENAI_UPLOAD_RECOMMENDATIONS_ENDPOINT = process.env.OPENAI_UPLOAD_RECOMMENDATIONS_ENDPOINT || "/api/openai-upload-recommendations";
 const OPENAI_SELECTED_RESULT_ENDPOINT = process.env.OPENAI_SELECTED_RESULT_ENDPOINT || "/api/openai-selected-result";
 const OPENAI_ACTIVATE_TRIAL_CODE_ENDPOINT = process.env.OPENAI_ACTIVATE_TRIAL_CODE_ENDPOINT || "/api/openai-activate-trial-code";
+const PUBLIC_GENERATIONS_ENDPOINT = process.env.PUBLIC_GENERATIONS_ENDPOINT || "/api/public-generations";
 const PUTER_FLUX_MODEL = process.env.PUTER_FLUX_MODEL || "black-forest-labs/flux.1-kontext-pro";
 const HF_KONTEXT_SPACE_URL = (process.env.HF_KONTEXT_SPACE_URL || "https://black-forest-labs-flux-1-kontext-dev.hf.space").replace(/\/$/, "");
 const HF_KONTEXT_STEPS = Number(process.env.HF_KONTEXT_STEPS || 20);
@@ -185,6 +186,35 @@ export const activateOpenAiTrialCode = async (code: string) => {
     alreadyActivated?: boolean;
     quota: AnalysisResult["quota"];
   };
+};
+
+export const fetchPublicGenerations = async (): Promise<PublicGeneration[]> => {
+  const response = await fetchWithTimeout(PUBLIC_GENERATIONS_ENDPOINT, {}, 30000);
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok || !payload.ok) {
+    throw new Error(payload.error || `Historique public indisponible: HTTP ${response.status}`);
+  }
+  return (payload.generations || []) as PublicGeneration[];
+};
+
+export const publishPublicGeneration = async (payload: {
+  proposal: Proposal;
+  analysis: Pick<AnalysisResult, "faceShape">;
+  consultation: ConsultationData;
+  sourceLabel: string;
+}): Promise<PublicGeneration> => {
+  const response = await fetchWithTimeout(PUBLIC_GENERATIONS_ENDPOINT, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload)
+  }, 30000);
+
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok || !result.ok) {
+    throw new Error(result.error || `Publication vitrine impossible: HTTP ${response.status}`);
+  }
+
+  return result.generation as PublicGeneration;
 };
 
 export const generateAlibabaUploadRecommendations = async (
