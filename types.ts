@@ -95,6 +95,7 @@ export interface PublicGeneration {
   createdAt: string;
   additionalViews?: AdditionalViews;
   consultation?: Partial<ConsultationData>;
+  publicGenerationId?: string;
 }
 
 export enum AppState {

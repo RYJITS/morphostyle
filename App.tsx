@@ -73,6 +73,8 @@ const App: React.FC = () => {
   const [isPublicGalleryLoading, setIsPublicGalleryLoading] = useState(false);
   const [publishingProposalId, setPublishingProposalId] = useState<string | null>(null);
   const [publishedProposalIds, setPublishedProposalIds] = useState<string[]>([]);
+  const [publishingGenerationId, setPublishingGenerationId] = useState<string | null>(null);
+  const [publishedGenerationIds, setPublishedGenerationIds] = useState<string[]>([]);
   const activeOperationRef = useRef(0);
   const uploadInputRef = useRef<HTMLInputElement | null>(null);
   const freeImageApiMode = isFreeImageApiMode();
@@ -256,6 +258,9 @@ const App: React.FC = () => {
     });
   };
 
+  const isGenerationPublished = (item: PublicGeneration) =>
+    Boolean(item.publicGenerationId || publishedGenerationIds.includes(item.id));
+
   const dailyGenerationFromProposal = (
     proposal: Proposal,
     analysisInput = analysis,
@@ -315,6 +320,50 @@ const App: React.FC = () => {
       showServiceError(err, "Publication vitrine impossible.");
     } finally {
       setPublishingProposalId(null);
+    }
+  };
+
+  const publishDailyGeneration = async (item: PublicGeneration) => {
+    setPublishingGenerationId(item.id);
+    try {
+      const generation = await publishPublicGeneration({
+        proposal: {
+          id: item.id,
+          imageUrl: item.imageUrl,
+          styleName: item.styleName,
+          description: item.styleName,
+          whyItWorks: item.faceShape,
+          color: item.color,
+          beardStyle: "Aucune",
+          additionalViews: item.additionalViews
+        },
+        analysis: { faceShape: item.faceShape },
+        consultation: {
+          maintenance: item.consultation?.maintenance || "medium",
+          lifestyle: item.consultation?.lifestyle || "modern",
+          targetLength: item.consultation?.targetLength || "any",
+          gender: item.consultation?.gender || "non-binary",
+          ageGroup: item.consultation?.ageGroup || "adult"
+        },
+        sourceLabel: item.sourceLabel
+      });
+
+      setPublicGenerations(prev => [generation, ...prev.filter(entry => entry.id !== generation.id && entry.imageUrl !== generation.imageUrl)].slice(0, 48));
+      setPublishedGenerationIds(prev => prev.includes(item.id) ? prev : [...prev, item.id]);
+      setDailyResults(prev => {
+        const next = prev.map(entry => entry.id === item.id ? { ...entry, publicGenerationId: generation.id } : entry);
+        saveDailyResults(next);
+        return next;
+      });
+      setGalleryDetail(prev => prev?.item.id === item.id ? {
+        ...prev,
+        item: { ...prev.item, publicGenerationId: generation.id }
+      } : prev);
+      setNotice("Resultat ajoute a la vitrine publique.");
+    } catch (err: any) {
+      showServiceError(err, "Publication vitrine impossible.");
+    } finally {
+      setPublishingGenerationId(null);
     }
   };
 
@@ -1391,14 +1440,33 @@ const App: React.FC = () => {
                   )}
                 </div>
               </div>
-              <button
-                type="button"
-                onClick={closeGenerationSheet}
-                className="inline-flex min-h-11 cursor-pointer items-center justify-center gap-2 rounded-full border border-gray-100 bg-white px-4 text-sm font-black text-gray-600 shadow-sm transition-all hover:border-rose-200 hover:text-rose-600 focus:outline-none focus:ring-4 focus:ring-rose-100"
-              >
-                <X className="h-4 w-4" />
-                Fermer
-              </button>
+              <div className="flex flex-wrap items-center gap-2">
+                {galleryDetail.scope === 'daily' && (
+                  <button
+                    type="button"
+                    onClick={() => publishDailyGeneration(galleryDetail.item)}
+                    disabled={publishingGenerationId === galleryDetail.item.id || isGenerationPublished(galleryDetail.item)}
+                    className="inline-flex min-h-11 cursor-pointer items-center justify-center gap-2 rounded-full bg-black px-4 text-xs font-black uppercase tracking-widest text-white shadow-sm transition-all hover:bg-gray-800 disabled:cursor-default disabled:bg-emerald-600 disabled:opacity-90 focus:outline-none focus:ring-4 focus:ring-rose-100"
+                  >
+                    {publishingGenerationId === galleryDetail.item.id ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : isGenerationPublished(galleryDetail.item) ? (
+                      <CheckCircle2 className="h-4 w-4" />
+                    ) : (
+                      <ImagePlus className="h-4 w-4 text-rose-300" />
+                    )}
+                    {isGenerationPublished(galleryDetail.item) ? "Publie dans public" : "Publier dans public"}
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={closeGenerationSheet}
+                  className="inline-flex min-h-11 cursor-pointer items-center justify-center gap-2 rounded-full border border-gray-100 bg-white px-4 text-sm font-black text-gray-600 shadow-sm transition-all hover:border-rose-200 hover:text-rose-600 focus:outline-none focus:ring-4 focus:ring-rose-100"
+                >
+                  <X className="h-4 w-4" />
+                  Fermer
+                </button>
+              </div>
             </div>
 
             <div className="grid gap-5 lg:grid-cols-[1.1fr_1fr]">
