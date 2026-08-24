@@ -21,6 +21,7 @@ export default defineConfig(({ mode }) => {
   const hfKontextAttempts = env.VITE_HF_KONTEXT_ATTEMPTS || env.HF_KONTEXT_ATTEMPTS || '3';
   const hfKontextTimeoutMs = env.VITE_HF_KONTEXT_TIMEOUT_MS || env.HF_KONTEXT_TIMEOUT_MS || '180000';
   const hfKontextFallbackEndpoint = env.VITE_HF_KONTEXT_FALLBACK_ENDPOINT || env.HF_KONTEXT_FALLBACK_ENDPOINT || '';
+  const apiProxyTarget = env.VITE_API_PROXY_TARGET || env.API_PROXY_TARGET || 'http://127.0.0.1:8787';
   const demoMode = env.VITE_DEMO_MODE || env.DEMO_MODE || (!apiKey && !freeImageProvider ? 'true' : 'false');
   const allowBrowserGemini = env.VITE_ALLOW_BROWSER_GEMINI === 'true';
 
@@ -51,7 +52,7 @@ export default defineConfig(({ mode }) => {
     server: {
       proxy: {
         '/api': {
-          target: 'http://127.0.0.1:8787',
+          target: apiProxyTarget,
           changeOrigin: false
         }
       }
