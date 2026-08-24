@@ -16,6 +16,7 @@ const FREE_PREVIEW_ENDPOINT = process.env.FREE_PREVIEW_ENDPOINT || "/api/free-pr
 const ALIBABA_UPLOAD_RECOMMENDATIONS_ENDPOINT = process.env.ALIBABA_UPLOAD_RECOMMENDATIONS_ENDPOINT || "/api/alibaba-upload-recommendations";
 const OPENAI_UPLOAD_RECOMMENDATIONS_ENDPOINT = process.env.OPENAI_UPLOAD_RECOMMENDATIONS_ENDPOINT || "/api/openai-upload-recommendations";
 const OPENAI_SELECTED_RESULT_ENDPOINT = process.env.OPENAI_SELECTED_RESULT_ENDPOINT || "/api/openai-selected-result";
+const OPENAI_ACTIVATE_TRIAL_CODE_ENDPOINT = process.env.OPENAI_ACTIVATE_TRIAL_CODE_ENDPOINT || "/api/openai-activate-trial-code";
 const PUTER_FLUX_MODEL = process.env.PUTER_FLUX_MODEL || "black-forest-labs/flux.1-kontext-pro";
 const HF_KONTEXT_SPACE_URL = (process.env.HF_KONTEXT_SPACE_URL || "https://black-forest-labs-flux-1-kontext-dev.hf.space").replace(/\/$/, "");
 const HF_KONTEXT_STEPS = Number(process.env.HF_KONTEXT_STEPS || 20);
@@ -85,6 +86,24 @@ const getOpenAiClientId = () => {
   }
 };
 
+type OpenAiServicePayload = {
+  error?: string;
+  quota?: AnalysisResult["quota"];
+  allowCodeActivation?: boolean;
+};
+
+const throwOpenAiServiceError = (payload: OpenAiServicePayload, status: number, fallback: string): never => {
+  const error = new Error(payload.error || `${fallback}: HTTP ${status}`) as Error & {
+    status?: number;
+    quota?: AnalysisResult["quota"];
+    allowCodeActivation?: boolean;
+  };
+  error.status = status;
+  error.quota = payload.quota;
+  error.allowCodeActivation = Boolean(payload.allowCodeActivation);
+  throw error;
+};
+
 export const isOpenAiUploadStyle = (style?: Pick<StyleRecommendation, "sourceProvider" | "id"> | null) =>
   style?.sourceProvider === "openai-upload" || String(style?.id || "").startsWith("openai-upload-");
 
@@ -104,7 +123,7 @@ export const generateOpenAiUploadRecommendations = async (
 
   const payload = await response.json().catch(() => ({}));
   if (!response.ok || !payload.ok) {
-    throw new Error(payload.error || `OpenAI indisponible: HTTP ${response.status}`);
+    throwOpenAiServiceError(payload, response.status, "OpenAI indisponible");
   }
 
   return {
@@ -139,10 +158,33 @@ export const generateOpenAiSelectedResult = async (
 
   const payload = await response.json().catch(() => ({}));
   if (!response.ok || !payload.ok) {
-    throw new Error(payload.error || `OpenAI indisponible: HTTP ${response.status}`);
+    throwOpenAiServiceError(payload, response.status, "OpenAI indisponible");
   }
 
   return payload.proposal;
+};
+
+export const activateOpenAiTrialCode = async (code: string) => {
+  const response = await fetchWithTimeout(OPENAI_ACTIVATE_TRIAL_CODE_ENDPOINT, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      code,
+      clientId: getOpenAiClientId()
+    })
+  }, 30000);
+
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok || !payload.ok) {
+    throwOpenAiServiceError(payload, response.status, "Activation du code impossible");
+  }
+
+  return payload as {
+    message: string;
+    usesAdded: number;
+    alreadyActivated?: boolean;
+    quota: AnalysisResult["quota"];
+  };
 };
 
 export const generateAlibabaUploadRecommendations = async (

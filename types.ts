@@ -63,6 +63,8 @@ export interface AnalysisResult {
   recommendedStyles: StyleRecommendation[];
   generationSessionId?: string;
   quota?: {
+    baseLimit?: number;
+    bonus?: number;
     limit: number;
     used: number;
     remaining: number;

@@ -35,6 +35,9 @@ const OPENAI_USAGE_DIR = path.join(rootDir, "server", "data");
 const OPENAI_USAGE_FILE = path.join(OPENAI_USAGE_DIR, "openai-daily-usage.json");
 const OPENAI_DAILY_TRIAL_LIMIT = Math.max(1, Number(process.env.OPENAI_DAILY_TRIAL_LIMIT || 1));
 const OPENAI_QUOTA_TIME_ZONE = process.env.OPENAI_QUOTA_TIME_ZONE || "Europe/Zurich";
+const DEFAULT_OPENAI_EXTRA_TRIAL_CODE_HASHES = [
+  "sha256:aacec90536a288fc7cc0a34b94f590f03db9bbe1dca24b26dc00944a8c90a073"
+];
 const DEFAULT_LOCAL_PYTHON_EXECUTABLE =
   "D:/00_Cerveau_IA/Conpetances/Video/ComfyUI/ComfyUI_windows_portable/python_embeded/python.exe";
 
@@ -313,6 +316,48 @@ const getOpenAiDailyTrialLimit = () =>
 
 const getOpenAiQuotaTimeZone = () => process.env.OPENAI_QUOTA_TIME_ZONE || OPENAI_QUOTA_TIME_ZONE;
 
+const getOpenAiExtraTrialUses = () =>
+  Math.max(1, Number(process.env.OPENAI_EXTRA_TRIAL_USES || 5));
+
+const normalizeOpenAiTrialCode = (value = "") =>
+  String(value)
+    .trim()
+    .toUpperCase()
+    .replace(/\s+/g, "")
+    .replace(/[–—]/g, "-")
+    .replace(/[^A-Z0-9-]/g, "");
+
+const hashOpenAiTrialCode = (value) =>
+  createHash("sha256").update(normalizeOpenAiTrialCode(value)).digest("hex");
+
+const getOpenAiExtraTrialCodeEntries = () => {
+  const envCodes = [
+    process.env.OPENAI_EXTRA_TRIAL_CODES || "",
+    process.env.OPENAI_EXTRA_TRIAL_CODE || ""
+  ]
+    .join(",")
+    .split(",")
+    .map(value => value.trim())
+    .filter(Boolean);
+
+  return [...DEFAULT_OPENAI_EXTRA_TRIAL_CODE_HASHES, ...envCodes];
+};
+
+const isOpenAiExtraTrialCodeValid = (code) => {
+  const normalizedCode = normalizeOpenAiTrialCode(code);
+  if (normalizedCode.length < 8) return false;
+  const codeHash = hashOpenAiTrialCode(normalizedCode);
+
+  return getOpenAiExtraTrialCodeEntries().some((entry) => {
+    const rawEntry = String(entry || "").trim();
+    if (!rawEntry) return false;
+    if (/^sha256:/i.test(rawEntry)) {
+      return rawEntry.slice(7).trim().toLowerCase() === codeHash;
+    }
+    return normalizeOpenAiTrialCode(rawEntry) === normalizedCode;
+  });
+};
+
 const getOpenAiQuotaDate = () =>
   new Intl.DateTimeFormat("en-CA", {
     timeZone: getOpenAiQuotaTimeZone(),
@@ -355,21 +400,70 @@ const comboFromConsultation = (consultation = {}) => [
   consultation.lifestyle || "modern"
 ].join("-");
 
+const getOpenAiClientQuota = (client = {}) => {
+  const baseLimit = getOpenAiDailyTrialLimit();
+  const bonus = Math.max(0, Number(client.bonusTrials || 0));
+  const limit = baseLimit + bonus;
+  const used = Math.max(0, Number(client.used || 0));
+
+  return {
+    baseLimit,
+    bonus,
+    limit,
+    used,
+    remaining: Math.max(0, limit - used),
+    resetLabel: getOpenAiQuotaResetLabel()
+  };
+};
+
+const activateOpenAiExtraTrialCode = async (req, payload = {}) => {
+  const normalizedCode = normalizeOpenAiTrialCode(payload.code);
+  if (!isOpenAiExtraTrialCodeValid(normalizedCode)) {
+    throw Object.assign(new Error("Code bonus invalide. Verifiez le code puis reessayez."), { status: 401 });
+  }
+
+  const usage = await readOpenAiUsage();
+  const clientKey = clientHashFromRequest(req, payload);
+  const client = usage.clients[clientKey] || { used: 0, sessions: {}, bonusTrials: 0, trialCodes: {} };
+  const codeHash = hashOpenAiTrialCode(normalizedCode);
+  const usesAdded = getOpenAiExtraTrialUses();
+  client.sessions = client.sessions || {};
+  client.trialCodes = client.trialCodes || {};
+  const alreadyActivated = Boolean(client.trialCodes[codeHash]);
+
+  if (!alreadyActivated) {
+    client.bonusTrials = Math.max(0, Number(client.bonusTrials || 0)) + usesAdded;
+    client.trialCodes[codeHash] = {
+      activatedAt: new Date().toISOString(),
+      usesAdded
+    };
+    usage.clients[clientKey] = client;
+    await writeOpenAiUsage(usage);
+  }
+
+  const quota = getOpenAiClientQuota(client);
+
+  return {
+    quota,
+    usesAdded,
+    alreadyActivated,
+    message: alreadyActivated
+      ? `Code deja active pour aujourd'hui. Vous avez ${quota.remaining} essai(s) restant(s).`
+      : `Code active: ${usesAdded} essais supplementaires ajoutes pour aujourd'hui.`
+  };
+};
+
 const reserveOpenAiDailyTrial = async ({ req, payload, sourceHash, combo }) => {
   const usage = await readOpenAiUsage();
   const clientKey = clientHashFromRequest(req, payload);
-  const limit = getOpenAiDailyTrialLimit();
-  const client = usage.clients[clientKey] || { used: 0, sessions: {} };
+  const client = usage.clients[clientKey] || { used: 0, sessions: {}, bonusTrials: 0, trialCodes: {} };
+  const beforeQuota = getOpenAiClientQuota(client);
 
-  if ((client.used || 0) >= limit) {
+  if (beforeQuota.remaining <= 0) {
     throw Object.assign(new Error(`Votre essai OpenAI du jour est deja utilise. Revenez ${getOpenAiQuotaResetLabel()} ou utilisez un profil exemple.`), {
       status: 429,
-      quota: {
-        limit,
-        used: client.used || 0,
-        remaining: 0,
-        resetLabel: getOpenAiQuotaResetLabel()
-      }
+      allowCodeActivation: true,
+      quota: beforeQuota
     });
   }
 
@@ -387,12 +481,7 @@ const reserveOpenAiDailyTrial = async ({ req, payload, sourceHash, combo }) => {
 
   return {
     sessionId,
-    quota: {
-      limit,
-      used: client.used,
-      remaining: Math.max(0, limit - client.used),
-      resetLabel: getOpenAiQuotaResetLabel()
-    }
+    quota: getOpenAiClientQuota(client)
   };
 };
 
@@ -2933,6 +3022,8 @@ const handleApi = async (req, res) => {
       hasOpenAiKey,
       openAiUploadRecommendations: hasOpenAiKey,
       openAiDailyTrialLimit: getOpenAiDailyTrialLimit(),
+      openAiExtraTrialCodeConfigured: getOpenAiExtraTrialCodeEntries().length > 0,
+      openAiExtraTrialUses: getOpenAiExtraTrialUses(),
       falEnabled: false,
       freeFallbacks: provider === "free-chain" || provider === "ai-horde",
       localComfyAvailable,
@@ -3015,7 +3106,22 @@ const handleApi = async (req, res) => {
       sendJson(res, status, {
         ok: false,
         error: error.message || "Generation OpenAI impossible.",
-        quota: error.quota
+        quota: error.quota,
+        allowCodeActivation: Boolean(error.allowCodeActivation)
+      });
+    }
+    return true;
+  }
+
+  if (req.method === "POST" && req.url === "/api/openai-activate-trial-code") {
+    try {
+      const payload = await readJsonBody(req);
+      const result = await activateOpenAiExtraTrialCode(req, payload);
+      sendJson(res, 200, { ok: true, ...result });
+    } catch (error) {
+      sendJson(res, error.status || 500, {
+        ok: false,
+        error: error.message || "Activation du code impossible."
       });
     }
     return true;

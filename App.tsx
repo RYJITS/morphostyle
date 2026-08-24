@@ -2,7 +2,7 @@
 import React, { useRef, useState } from 'react';
 import Header from './components/Header';
 import { AppState, AnalysisResult, Proposal, ConsultationData } from './types';
-import { analyzeMorphology, generateHairstyleImage, generateStyleAngles, generateQuickPreview, generateOpenAiUploadRecommendations, generateOpenAiSelectedResult, isOpenAiUploadStyle, isFreeImageApiMode, isImageToImageMode, isPuterFluxImageToImageMode, isHuggingFaceKontextImageToImageMode, isLocalRetouchImageToImageMode, createLocalPreviewFallback, createLocalExampleAnalysis } from './services/geminiService';
+import { analyzeMorphology, generateHairstyleImage, generateStyleAngles, generateQuickPreview, generateOpenAiUploadRecommendations, generateOpenAiSelectedResult, activateOpenAiTrialCode, isOpenAiUploadStyle, isFreeImageApiMode, isImageToImageMode, isPuterFluxImageToImageMode, isHuggingFaceKontextImageToImageMode, isLocalRetouchImageToImageMode, createLocalPreviewFallback, createLocalExampleAnalysis } from './services/geminiService';
 import { DEMO_EXAMPLES, DemoExample } from './services/demoExamples';
 import { getPreparedCombinationBoardUrl, getPreparedProfileStyles, hasPreparedCombination, hasPreparedLookDatabase } from './services/profileLookDatabase';
 import { 
@@ -59,6 +59,11 @@ const App: React.FC = () => {
   const [proposals, setProposals] = useState<Proposal[]>([]);
   const [loadingStep, setLoadingStep] = useState<string>('');
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [trialCode, setTrialCode] = useState('');
+  const [trialCodeMessage, setTrialCodeMessage] = useState<string | null>(null);
+  const [canActivateTrialCode, setCanActivateTrialCode] = useState(false);
+  const [isActivatingTrialCode, setIsActivatingTrialCode] = useState(false);
   const [zoomImage, setZoomImage] = useState<string | null>(null);
   const [selectedExampleId, setSelectedExampleId] = useState<string | null>(null);
   const activeOperationRef = useRef(0);
@@ -110,6 +115,47 @@ const App: React.FC = () => {
         : 'Reference active';
   const demographicsLocked = !!selectedExample;
 
+  const isTrialQuotaError = (err: any, message: string) =>
+    Boolean(err?.allowCodeActivation) || /essai openai du jour|essai du jour|quota quotidien/i.test(message);
+
+  const clearServiceAlert = () => {
+    setError(null);
+    setNotice(null);
+    setTrialCode('');
+    setTrialCodeMessage(null);
+    setCanActivateTrialCode(false);
+  };
+
+  const showServiceError = (err: any, fallback: string) => {
+    const message = err?.message || fallback;
+    setNotice(null);
+    setError(message);
+    setTrialCodeMessage(null);
+    setCanActivateTrialCode(isTrialQuotaError(err, message));
+  };
+
+  const handleActivateTrialCode = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const code = trialCode.trim();
+    if (!code) {
+      setTrialCodeMessage("Entrez le code bonus.");
+      return;
+    }
+
+    setIsActivatingTrialCode(true);
+    setTrialCodeMessage(null);
+    try {
+      const result = await activateOpenAiTrialCode(code);
+      clearServiceAlert();
+      setTrialCode('');
+      setNotice(result.message || "Code active. Relancez la generation OpenAI.");
+    } catch (err: any) {
+      setTrialCodeMessage(err?.message || "Activation du code impossible.");
+    } finally {
+      setIsActivatingTrialCode(false);
+    }
+  };
+
   const getExampleSourceNote = (example: DemoExample) =>
     example.assetId === "marc"
       ? "Planche statique preparee: la morphologie de depart est gardee, puis les recommandations viennent de la selection validee."
@@ -157,7 +203,7 @@ const App: React.FC = () => {
     setSelectedStyles([]);
     setProposals([]);
     setZoomImage(null);
-    setError(null);
+    clearServiceAlert();
     setState(AppState.CONSULTATION);
     scrollToTop();
   };
@@ -166,7 +212,7 @@ const App: React.FC = () => {
     cancelActiveOperation();
     setProposals([]);
     setZoomImage(null);
-    setError(null);
+    clearServiceAlert();
     setState(analysis ? AppState.SELECTION : AppState.CONSULTATION);
     scrollToTop();
   };
@@ -174,14 +220,14 @@ const App: React.FC = () => {
   const returnFromLoading = () => {
     cancelActiveOperation();
     setLoadingStep('');
-    setError(null);
+    clearServiceAlert();
     setState(state === AppState.GENERATING && analysis ? AppState.SELECTION : AppState.CONSULTATION);
     scrollToTop();
   };
 
   const performInitialExpertise = async () => {
     if (!userImage) return;
-    setError(null);
+    clearServiceAlert();
     const operationId = beginOperation();
     try {
       setState(AppState.ANALYZING);
@@ -207,7 +253,7 @@ const App: React.FC = () => {
       }
     } catch (err: any) {
       if (!isCurrentOperation(operationId)) return;
-      setError(err.message || "Le service OpenAI est indisponible. Veuillez patienter.");
+      showServiceError(err, "Le service OpenAI est indisponible. Veuillez patienter.");
       setState(AppState.CONSULTATION);
     }
   };
@@ -267,7 +313,7 @@ const App: React.FC = () => {
     setAnalysis(null);
     setSelectedStyles([]);
     setProposals([]);
-    setError(null);
+    clearServiceAlert();
     setZoomImage(null);
   };
 
@@ -286,7 +332,7 @@ const App: React.FC = () => {
 
   const startExampleConsultation = (example: DemoExample) => {
     cancelActiveOperation();
-    setError(null);
+    clearServiceAlert();
     setZoomImage(null);
     setAnalysis(null);
     setProposals([]);
@@ -307,14 +353,14 @@ const App: React.FC = () => {
     event.target.value = "";
     if (!file) return;
     if (!file.type.startsWith("image/")) {
-      setError("Veuillez charger une image valide.");
+      showServiceError(new Error("Veuillez charger une image valide."), "Veuillez charger une image valide.");
       return;
     }
 
     const reader = new FileReader();
     reader.onload = () => {
       cancelActiveOperation();
-      setError(null);
+      clearServiceAlert();
       setZoomImage(null);
       setAnalysis(null);
       setProposals([]);
@@ -330,13 +376,13 @@ const App: React.FC = () => {
       setState(AppState.CONSULTATION);
       scrollToTop();
     };
-    reader.onerror = () => setError("Lecture de la photo impossible.");
+    reader.onerror = () => showServiceError(new Error("Lecture de la photo impossible."), "Lecture de la photo impossible.");
     reader.readAsDataURL(file);
   };
 
   const runCompleteExample = async (example: DemoExample) => {
     const operationId = beginOperation();
-    setError(null);
+    clearServiceAlert();
     setZoomImage(null);
     setSelectedExampleId(example.id);
     setConsultation(example.consultation);
@@ -385,7 +431,7 @@ const App: React.FC = () => {
       scrollToTop();
     } catch (err: any) {
       if (!isCurrentOperation(operationId)) return;
-      setError(err.message || "Impossible de charger cet exemple complet.");
+      showServiceError(err, "Impossible de charger cet exemple complet.");
       setState(AppState.IDLE);
     }
   };
@@ -444,7 +490,7 @@ const App: React.FC = () => {
       scrollToTop();
     } catch (err: any) {
       if (!isCurrentOperation(operationId)) return;
-      setError(err.message || "Erreur de génération.");
+      showServiceError(err, "Erreur de génération.");
       setState(AppState.SELECTION);
     }
   };
@@ -579,13 +625,43 @@ const App: React.FC = () => {
       
       <main className="flex-grow max-w-7xl mx-auto px-4 py-8 w-full">
         {error && (
-          <div className="fixed top-24 left-1/2 -translate-x-1/2 max-w-xl w-full z-[60] bg-red-50 p-6 rounded-2xl flex items-center gap-4 text-red-700 border border-red-100 shadow-xl animate-in slide-in-from-top-4">
-            <AlertTriangle className="w-6 h-6 shrink-0" />
+          <div className="fixed top-24 left-1/2 -translate-x-1/2 max-w-xl w-[calc(100%-2rem)] z-[60] bg-red-50 p-6 rounded-2xl flex items-start gap-4 text-red-700 border border-red-100 shadow-xl animate-in slide-in-from-top-4">
+            <AlertTriangle className="w-6 h-6 shrink-0 mt-1" />
             <div className="flex-grow">
                <p className="text-sm font-bold">Erreur de service</p>
                <p className="text-sm font-medium">{error}</p>
+               {canActivateTrialCode && (
+                <div className="mt-4">
+                  <form onSubmit={handleActivateTrialCode} className="flex flex-col gap-2 sm:flex-row">
+                    <input
+                      value={trialCode}
+                      onChange={(event) => setTrialCode(event.target.value)}
+                      placeholder="Utiliser un code"
+                      aria-label="Code bonus OpenAI"
+                      className="min-h-11 flex-1 rounded-xl border border-red-100 bg-white px-3 text-sm font-bold text-gray-900 outline-none transition-all placeholder:text-gray-400 focus:border-rose-300 focus:ring-4 focus:ring-rose-100"
+                    />
+                    <button
+                      type="submit"
+                      disabled={isActivatingTrialCode}
+                      className="inline-flex min-h-11 items-center justify-center gap-2 rounded-xl bg-black px-4 text-xs font-black uppercase tracking-widest text-white transition-all hover:bg-gray-800 disabled:cursor-wait disabled:opacity-60"
+                    >
+                      {isActivatingTrialCode && <Loader2 className="h-4 w-4 animate-spin" />}
+                      Activer +5
+                    </button>
+                  </form>
+                  {trialCodeMessage && <p className="mt-2 text-xs font-bold text-red-600">{trialCodeMessage}</p>}
+                </div>
+               )}
             </div>
-            <button onClick={() => setError(null)} className="p-2 hover:bg-red-100 rounded-full transition-colors"><X className="w-5 h-5" /></button>
+            <button onClick={clearServiceAlert} className="p-2 hover:bg-red-100 rounded-full transition-colors"><X className="w-5 h-5" /></button>
+          </div>
+        )}
+
+        {notice && (
+          <div className="fixed top-24 left-1/2 -translate-x-1/2 max-w-xl w-[calc(100%-2rem)] z-[60] bg-emerald-50 p-5 rounded-2xl flex items-start gap-4 text-emerald-800 border border-emerald-100 shadow-xl animate-in slide-in-from-top-4">
+            <CheckCircle2 className="w-6 h-6 shrink-0 mt-0.5" />
+            <p className="flex-grow text-sm font-bold">{notice}</p>
+            <button onClick={() => setNotice(null)} className="p-2 hover:bg-emerald-100 rounded-full transition-colors"><X className="w-5 h-5" /></button>
           </div>
         )}
 
