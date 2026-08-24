@@ -974,6 +974,8 @@ const App: React.FC = () => {
     );
   };
 
+  const galleryOriginalUrl = galleryDetail?.scope === 'daily' ? galleryDetail.item.originalImageUrl || "" : "";
+
   return (
     <div className="min-h-screen flex flex-col bg-[#FDFCFB]">
       <Header />
@@ -1501,17 +1503,18 @@ const App: React.FC = () => {
               </div>
             </div>
 
-            <div className="grid gap-5 lg:grid-cols-[1.1fr_1fr]">
-              <div className="overflow-hidden rounded-[1.5rem] border border-gray-100 bg-gray-100 shadow-xl">
+            <div className={`grid gap-5 ${galleryOriginalUrl ? "lg:grid-cols-[1.1fr_1fr]" : ""}`}>
+              {galleryOriginalUrl && (
+              <div className="relative overflow-hidden rounded-[1.5rem] border border-rose-100 bg-gray-100 shadow-xl">
                 <button
                   type="button"
-                  onClick={() => setZoomImage(galleryDetail.item.imageUrl)}
+                  onClick={() => setZoomImage(galleryOriginalUrl)}
                   className="group relative block aspect-[3/4] w-full cursor-pointer overflow-hidden"
-                  aria-label="Agrandir la vue de face"
+                  aria-label="Agrandir la photo d'origine"
                 >
                   <img
-                    src={galleryDetail.item.imageUrl}
-                    alt={`${galleryDetail.item.styleName} face`}
+                    src={galleryOriginalUrl}
+                    alt="Photo d'origine"
                     className="h-full w-full object-cover transition-transform duration-500 group-hover:scale-105"
                     onError={(event) => {
                       event.currentTarget.onerror = null;
@@ -1519,11 +1522,21 @@ const App: React.FC = () => {
                     }}
                   />
                   <div className="absolute inset-x-4 bottom-4 flex items-center justify-between gap-3 rounded-2xl bg-black/60 px-4 py-3 text-white backdrop-blur-xl">
-                    <span className="text-xs font-black uppercase tracking-widest">Face</span>
+                    <span className="text-xs font-black uppercase tracking-widest">Photo d'origine</span>
                     <Maximize2 className="h-4 w-4" />
                   </div>
                 </button>
+                <a
+                  href={galleryOriginalUrl}
+                  download={imageDownloadName(galleryDetail.item.styleName, "origine", galleryOriginalUrl)}
+                  onClick={(event) => event.stopPropagation()}
+                  className="absolute right-4 top-4 inline-flex min-h-10 cursor-pointer items-center justify-center gap-2 rounded-full bg-white/95 px-3 text-[9px] font-black uppercase tracking-widest text-gray-700 shadow-lg backdrop-blur-xl transition-all hover:text-rose-600 focus:outline-none focus:ring-4 focus:ring-rose-100"
+                >
+                  <Download className="h-3.5 w-3.5" />
+                  Telecharger
+                </a>
               </div>
+              )}
 
               <div className="flex flex-col gap-4">
                 <div className="rounded-3xl border border-gray-100 bg-gray-50 p-4">
@@ -1531,45 +1544,7 @@ const App: React.FC = () => {
                   <div className="mt-1 text-sm font-black text-gray-950">{galleryDetail.item.faceShape}</div>
                 </div>
 
-                {galleryDetail.scope === 'daily' && galleryDetail.item.originalImageUrl && (
-                  <div className="overflow-hidden rounded-3xl border border-rose-100 bg-rose-50/60 p-3 shadow-sm">
-                    <div className="mb-3 flex items-center justify-between gap-3 px-1">
-                      <div>
-                        <div className="text-[10px] font-black uppercase tracking-widest text-rose-500">Photo d'origine</div>
-                        <div className="text-xs font-bold text-gray-500">Reference de depart</div>
-                      </div>
-                      <a
-                        href={galleryDetail.item.originalImageUrl}
-                        download={imageDownloadName(galleryDetail.item.styleName, "origine", galleryDetail.item.originalImageUrl)}
-                        className="inline-flex min-h-10 cursor-pointer items-center justify-center gap-2 rounded-xl bg-white px-3 text-[9px] font-black uppercase tracking-widest text-gray-600 shadow-sm transition-all hover:text-rose-600 focus:outline-none focus:ring-4 focus:ring-rose-100"
-                      >
-                        <Download className="h-3.5 w-3.5" />
-                        Telecharger
-                      </a>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => setZoomImage(galleryDetail.item.originalImageUrl || null)}
-                      className="group relative block aspect-[3/4] w-full cursor-pointer overflow-hidden rounded-2xl bg-gray-100"
-                      aria-label="Agrandir la photo d'origine"
-                    >
-                      <img
-                        src={galleryDetail.item.originalImageUrl}
-                        alt="Photo d'origine"
-                        className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-105"
-                        onError={(event) => {
-                          event.currentTarget.onerror = null;
-                          event.currentTarget.src = createLocalPreviewFallback(galleryDetail.item);
-                        }}
-                      />
-                      <div className="absolute inset-x-2 bottom-2 rounded-xl bg-black/55 px-2 py-1.5 text-[8px] font-black uppercase tracking-widest text-white backdrop-blur-md">
-                        Origine
-                      </div>
-                    </button>
-                  </div>
-                )}
-
-                <div className="grid grid-cols-2 gap-3">
+                <div className={`grid gap-3 ${galleryOriginalUrl ? "grid-cols-2" : "grid-cols-2 sm:grid-cols-4"}`}>
                   {generationImages(galleryDetail.item).map((entry) => (
                     <div key={`${galleryDetail.item.id}-${entry.key}`} className="overflow-hidden rounded-2xl border border-gray-100 bg-white shadow-sm">
                       <button
