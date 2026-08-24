@@ -223,6 +223,34 @@ const App: React.FC = () => {
     return `${imageFileName(label, suffix)}.${extension === "jpeg" ? "jpg" : extension}`;
   };
 
+  const createOriginalHistoryPreview = async (source?: string | null) => {
+    if (!source) return "";
+    if (!source.startsWith("data:image/")) return source;
+
+    return new Promise<string>((resolve) => {
+      const image = new Image();
+      image.onload = () => {
+        const maxWidth = 320;
+        const maxHeight = 426;
+        const ratio = Math.min(maxWidth / image.naturalWidth, maxHeight / image.naturalHeight, 1);
+        const width = Math.max(1, Math.round(image.naturalWidth * ratio));
+        const height = Math.max(1, Math.round(image.naturalHeight * ratio));
+        const canvas = document.createElement("canvas");
+        canvas.width = width;
+        canvas.height = height;
+        const context = canvas.getContext("2d");
+        if (!context) {
+          resolve("");
+          return;
+        }
+        context.drawImage(image, 0, 0, width, height);
+        resolve(canvas.toDataURL("image/jpeg", 0.72));
+      };
+      image.onerror = () => resolve(source.length < 750000 ? source : "");
+      image.src = source;
+    });
+  };
+
   const viewLabel = (key: string) => {
     if (key === "front") return "Face";
     if (key === "left") return "Profil gauche";
@@ -265,7 +293,8 @@ const App: React.FC = () => {
     proposal: Proposal,
     analysisInput = analysis,
     consultationInput = consultation,
-    sourceLabel = selectedExample ? selectedExample.name : "Photo personnelle"
+    sourceLabel = selectedExample ? selectedExample.name : "Photo personnelle",
+    originalImageUrl = ""
   ): PublicGeneration | null => {
     if (!analysisInput) return null;
 
@@ -278,18 +307,21 @@ const App: React.FC = () => {
       sourceLabel,
       createdAt: new Date().toISOString(),
       additionalViews: proposal.additionalViews,
-      consultation: consultationInput
+      consultation: consultationInput,
+      originalImageUrl
     };
   };
 
-  const rememberDailyProposals = (
+  const rememberDailyProposals = async (
     items: Proposal[],
     analysisInput = analysis,
     consultationInput = consultation,
-    sourceLabel = selectedExample ? selectedExample.name : "Photo personnelle"
+    sourceLabel = selectedExample ? selectedExample.name : "Photo personnelle",
+    originalSource = userImage
   ) => {
+    const originalImageUrl = await createOriginalHistoryPreview(originalSource);
     const entries = items
-      .map(item => dailyGenerationFromProposal(item, analysisInput, consultationInput, sourceLabel))
+      .map(item => dailyGenerationFromProposal(item, analysisInput, consultationInput, sourceLabel, originalImageUrl))
       .filter((item): item is PublicGeneration => Boolean(item));
     if (!entries.length) return;
 
@@ -642,7 +674,7 @@ const App: React.FC = () => {
         isPreparedAsset: finalStyle.isPreparedAsset
       };
       setProposals([exampleProposal]);
-      rememberDailyProposals([exampleProposal], result, example.consultation, example.name);
+      void rememberDailyProposals([exampleProposal], result, example.consultation, example.name, example.sourceImage);
       setState(AppState.RESULTS);
       scrollToTop();
     } catch (err: any) {
@@ -703,7 +735,7 @@ const App: React.FC = () => {
       if (newProposals.length === 0) throw new Error("Génération impossible sur cette photo.");
       
       setProposals(newProposals);
-      rememberDailyProposals(newProposals);
+      void rememberDailyProposals(newProposals, analysis, consultation, selectedExample ? selectedExample.name : "Photo personnelle", userImage);
       setState(AppState.RESULTS);
       scrollToTop();
     } catch (err: any) {
@@ -1498,6 +1530,44 @@ const App: React.FC = () => {
                   <div className="text-[10px] font-black uppercase tracking-widest text-gray-400">Morphologie</div>
                   <div className="mt-1 text-sm font-black text-gray-950">{galleryDetail.item.faceShape}</div>
                 </div>
+
+                {galleryDetail.scope === 'daily' && galleryDetail.item.originalImageUrl && (
+                  <div className="overflow-hidden rounded-3xl border border-rose-100 bg-rose-50/60 p-3 shadow-sm">
+                    <div className="mb-3 flex items-center justify-between gap-3 px-1">
+                      <div>
+                        <div className="text-[10px] font-black uppercase tracking-widest text-rose-500">Photo d'origine</div>
+                        <div className="text-xs font-bold text-gray-500">Reference de depart</div>
+                      </div>
+                      <a
+                        href={galleryDetail.item.originalImageUrl}
+                        download={imageDownloadName(galleryDetail.item.styleName, "origine", galleryDetail.item.originalImageUrl)}
+                        className="inline-flex min-h-10 cursor-pointer items-center justify-center gap-2 rounded-xl bg-white px-3 text-[9px] font-black uppercase tracking-widest text-gray-600 shadow-sm transition-all hover:text-rose-600 focus:outline-none focus:ring-4 focus:ring-rose-100"
+                      >
+                        <Download className="h-3.5 w-3.5" />
+                        Telecharger
+                      </a>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setZoomImage(galleryDetail.item.originalImageUrl || null)}
+                      className="group relative block aspect-[3/4] w-full cursor-pointer overflow-hidden rounded-2xl bg-gray-100"
+                      aria-label="Agrandir la photo d'origine"
+                    >
+                      <img
+                        src={galleryDetail.item.originalImageUrl}
+                        alt="Photo d'origine"
+                        className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-105"
+                        onError={(event) => {
+                          event.currentTarget.onerror = null;
+                          event.currentTarget.src = createLocalPreviewFallback(galleryDetail.item);
+                        }}
+                      />
+                      <div className="absolute inset-x-2 bottom-2 rounded-xl bg-black/55 px-2 py-1.5 text-[8px] font-black uppercase tracking-widest text-white backdrop-blur-md">
+                        Origine
+                      </div>
+                    </button>
+                  </div>
+                )}
 
                 <div className="grid grid-cols-2 gap-3">
                   {generationImages(galleryDetail.item).map((entry) => (

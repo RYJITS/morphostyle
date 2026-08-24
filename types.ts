@@ -96,6 +96,7 @@ export interface PublicGeneration {
   additionalViews?: AdditionalViews;
   consultation?: Partial<ConsultationData>;
   publicGenerationId?: string;
+  originalImageUrl?: string;
 }
 
 export enum AppState {
