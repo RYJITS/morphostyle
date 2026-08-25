@@ -82,6 +82,7 @@ public/demo-profiles/*/final-views/*.png
 server/data/openai-daily-usage.json
 server/data/public-generations.json
 server/data/public-gallery/
+server/data/user-memory.json
 docs/daily-tests/evidence/
 *.zip
 *.7z

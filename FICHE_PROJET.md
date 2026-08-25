@@ -48,6 +48,8 @@ Après installation, l'utilisateur accède à l'application via un navigateur we
 - Blocage du deuxieme essai journalier cote serveur
 - Validation automatique des ages pour eviter les suggestions inappropriees
 - Conservation automatique de l'identite, de la lumiere et du contexte dans les prompts
+- Memoire projet Markdown dans `docs/memoire/`
+- Cahier d'ajout multi-utilisateur Hostinger dans `docs/architecture/AJOUT_MULTI_UTILISATEUR_HOSTINGER.md`
 
 ## Captures d'ecran
 ![Capture 1 - morphostyle](docs/captures/20-morphostyle-2026-06-25_03-17-30-desktop.png)

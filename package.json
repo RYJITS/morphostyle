@@ -6,7 +6,7 @@
   "main": "server.js",
   "scripts": {
     "dev": "vite",
-    "dev:api": "node -e \"process.env.PORT=process.env.PORT||'8787'; import('./server/index.mjs')\"",
+    "dev:api": "node -e \"process.env.PORT=process.env.PORT||'8787'; import('./server/index.mjs').then(m => m.startMorphoStyleServer())\"",
     "start": "node server.js",
     "build": "tsc && vite build",
     "lint": "tsc --noEmit",

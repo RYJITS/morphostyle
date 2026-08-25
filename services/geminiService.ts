@@ -18,6 +18,8 @@ const OPENAI_UPLOAD_RECOMMENDATIONS_ENDPOINT = process.env.OPENAI_UPLOAD_RECOMME
 const OPENAI_SELECTED_RESULT_ENDPOINT = process.env.OPENAI_SELECTED_RESULT_ENDPOINT || "/api/openai-selected-result";
 const OPENAI_ACTIVATE_TRIAL_CODE_ENDPOINT = process.env.OPENAI_ACTIVATE_TRIAL_CODE_ENDPOINT || "/api/openai-activate-trial-code";
 const PUBLIC_GENERATIONS_ENDPOINT = process.env.PUBLIC_GENERATIONS_ENDPOINT || "/api/public-generations";
+const GUEST_SESSION_ENDPOINT = process.env.GUEST_SESSION_ENDPOINT || "/api/session/guest";
+const PERSONAL_GENERATIONS_ENDPOINT = process.env.PERSONAL_GENERATIONS_ENDPOINT || "/api/me/generations";
 const PUTER_FLUX_MODEL = process.env.PUTER_FLUX_MODEL || "black-forest-labs/flux.1-kontext-pro";
 const HF_KONTEXT_SPACE_URL = (process.env.HF_KONTEXT_SPACE_URL || "https://black-forest-labs-flux-1-kontext-dev.hf.space").replace(/\/$/, "");
 const HF_KONTEXT_STEPS = Number(process.env.HF_KONTEXT_STEPS || 20);
@@ -74,7 +76,7 @@ export const isHuggingFaceKontextImageToImageMode = () => USE_HF_KONTEXT_IMAGE_T
 export const isLocalRetouchImageToImageMode = () => USE_LOCAL_RETOUCH_IMAGE_TO_IMAGE;
 export const isImageToImageMode = () => USE_IMAGE_TO_IMAGE;
 
-const getOpenAiClientId = () => {
+export const getMorphoClientId = () => {
   const key = "morphostyle_openai_client_id";
   try {
     const existing = window.localStorage.getItem(key);
@@ -86,6 +88,8 @@ const getOpenAiClientId = () => {
     return "morphostyle-browser-client";
   }
 };
+
+const getOpenAiClientId = getMorphoClientId;
 
 type OpenAiServicePayload = {
   error?: string;
@@ -188,6 +192,38 @@ export const activateOpenAiTrialCode = async (code: string) => {
   };
 };
 
+export const fetchGuestSession = async () => {
+  const response = await fetchWithTimeout(GUEST_SESSION_ENDPOINT, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ clientId: getMorphoClientId() })
+  }, 30000);
+
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok || !payload.ok) {
+    throw new Error(payload.error || `Session invite indisponible: HTTP ${response.status}`);
+  }
+
+  return payload as {
+    owner: { type: "guest"; id: string; status: string };
+    quota?: AnalysisResult["quota"];
+    generations?: PublicGeneration[];
+  };
+};
+
+export const fetchPersonalGenerations = async (scope: "today" | "all" = "today"): Promise<PublicGeneration[]> => {
+  const params = new URLSearchParams({
+    clientId: getMorphoClientId(),
+    scope
+  });
+  const response = await fetchWithTimeout(`${PERSONAL_GENERATIONS_ENDPOINT}?${params.toString()}`, {}, 30000);
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok || !payload.ok) {
+    throw new Error(payload.error || `Historique personnel indisponible: HTTP ${response.status}`);
+  }
+  return (payload.generations || []) as PublicGeneration[];
+};
+
 export const fetchPublicGenerations = async (): Promise<PublicGeneration[]> => {
   const response = await fetchWithTimeout(PUBLIC_GENERATIONS_ENDPOINT, {}, 30000);
   const payload = await response.json().catch(() => ({}));
@@ -206,7 +242,11 @@ export const publishPublicGeneration = async (payload: {
   const response = await fetchWithTimeout(PUBLIC_GENERATIONS_ENDPOINT, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload)
+    body: JSON.stringify({
+      ...payload,
+      clientId: getMorphoClientId(),
+      personalGenerationId: payload.proposal.id
+    })
   }, 30000);
 
   const result = await response.json().catch(() => ({}));

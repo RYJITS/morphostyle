@@ -2,7 +2,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import Header from './components/Header';
 import { AppState, AnalysisResult, Proposal, ConsultationData, PublicGeneration } from './types';
-import { analyzeMorphology, generateHairstyleImage, generateStyleAngles, generateQuickPreview, generateOpenAiUploadRecommendations, generateOpenAiSelectedResult, activateOpenAiTrialCode, fetchPublicGenerations, publishPublicGeneration, isOpenAiUploadStyle, isFreeImageApiMode, isImageToImageMode, isPuterFluxImageToImageMode, isHuggingFaceKontextImageToImageMode, isLocalRetouchImageToImageMode, createLocalPreviewFallback, createLocalExampleAnalysis } from './services/geminiService';
+import { analyzeMorphology, generateHairstyleImage, generateStyleAngles, generateQuickPreview, generateOpenAiUploadRecommendations, generateOpenAiSelectedResult, activateOpenAiTrialCode, fetchGuestSession, fetchPersonalGenerations, fetchPublicGenerations, publishPublicGeneration, isOpenAiUploadStyle, isFreeImageApiMode, isImageToImageMode, isPuterFluxImageToImageMode, isHuggingFaceKontextImageToImageMode, isLocalRetouchImageToImageMode, createLocalPreviewFallback, createLocalExampleAnalysis } from './services/geminiService';
 import { DEMO_EXAMPLES, DemoExample } from './services/demoExamples';
 import { getPreparedCombinationBoardUrl, getPreparedProfileStyles, hasPreparedCombination, hasPreparedLookDatabase } from './services/profileLookDatabase';
 import { 
@@ -148,9 +148,47 @@ const App: React.FC = () => {
     }
   };
 
+  const mergeHistoryResults = (...groups: PublicGeneration[][]) => {
+    const byKey = new Map<string, PublicGeneration>();
+    groups.flat().forEach((item) => {
+      const key = item.id || item.imageUrl;
+      if (!key) return;
+      const existing = byKey.get(key);
+      byKey.set(key, existing ? { ...existing, ...item } : item);
+    });
+    return Array.from(byKey.values())
+      .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))
+      .slice(0, 48);
+  };
+
+  const refreshPersonalHistory = async () => {
+    try {
+      const serverResults = await fetchPersonalGenerations("today");
+      setDailyResults(prev => {
+        const merged = mergeHistoryResults(serverResults, prev);
+        saveDailyResults(merged);
+        return merged;
+      });
+    } catch {
+      // The local daily history remains available if the server history is not ready.
+    }
+  };
+
   useEffect(() => {
     let mounted = true;
-    setDailyResults(loadDailyResults());
+    const localDailyResults = loadDailyResults();
+    setDailyResults(localDailyResults);
+    fetchGuestSession()
+      .then(session => {
+        if (!mounted) return;
+        const serverResults = Array.isArray(session.generations) ? session.generations : [];
+        const merged = mergeHistoryResults(serverResults, localDailyResults);
+        setDailyResults(merged);
+        saveDailyResults(merged);
+      })
+      .catch(() => {
+        if (mounted) setDailyResults(localDailyResults);
+      });
     setIsPublicGalleryLoading(true);
     fetchPublicGenerations()
       .then(generations => {
@@ -748,6 +786,7 @@ const App: React.FC = () => {
       
       setProposals(newProposals);
       void rememberDailyProposals(newProposals, analysis, consultation, selectedExample ? selectedExample.name : "Photo personnelle", userImage);
+      if (!selectedExample) void refreshPersonalHistory();
       setState(AppState.RESULTS);
       scrollToTop();
     } catch (err: any) {

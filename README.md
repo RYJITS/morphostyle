@@ -11,6 +11,8 @@ MorphoStyle AI - Assistant de conseil coiffure et style par IA est presente ici 
 - Quota utilisateur: 1 essai complet par jour.
 - Cout API controle: 1 planche 4x4 pour les 4 recommandations, puis 1 planche finale pour la coupe selectionnee.
 - Les cles API restent cote serveur et ne sont jamais exposees dans le navigateur.
+- Memoire projet: `docs/memoire/`.
+- Ajout multi-utilisateur Hostinger a cadrer: `docs/architecture/AJOUT_MULTI_UTILISATEUR_HOSTINGER.md`.
 
 ## Demarrage rapide
 

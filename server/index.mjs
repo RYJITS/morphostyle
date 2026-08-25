@@ -7,6 +7,7 @@ import { createRequire } from "node:module";
 import { createHash } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { createUserMemoryStore } from "./user-memory.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, "..");
@@ -35,6 +36,7 @@ const OPENAI_USAGE_DIR = path.join(rootDir, "server", "data");
 const OPENAI_USAGE_FILE = path.join(OPENAI_USAGE_DIR, "openai-daily-usage.json");
 const PUBLIC_GENERATIONS_FILE = path.join(OPENAI_USAGE_DIR, "public-generations.json");
 const PUBLIC_GALLERY_DIR = path.join(OPENAI_USAGE_DIR, "public-gallery");
+const USER_MEMORY_FILE = "user-memory.json";
 const OPENAI_DAILY_TRIAL_LIMIT = Math.max(1, Number(process.env.OPENAI_DAILY_TRIAL_LIMIT || 1));
 const OPENAI_QUOTA_TIME_ZONE = process.env.OPENAI_QUOTA_TIME_ZONE || "Europe/Zurich";
 const DEFAULT_OPENAI_EXTRA_TRIAL_CODE_HASHES = [
@@ -42,6 +44,12 @@ const DEFAULT_OPENAI_EXTRA_TRIAL_CODE_HASHES = [
 ];
 const DEFAULT_LOCAL_PYTHON_EXECUTABLE =
   "D:/00_Cerveau_IA/Conpetances/Video/ComfyUI/ComfyUI_windows_portable/python_embeded/python.exe";
+
+const userMemory = createUserMemoryStore({
+  dataDir: OPENAI_USAGE_DIR,
+  fileName: USER_MEMORY_FILE,
+  timeZone: OPENAI_QUOTA_TIME_ZONE
+});
 
 const mimeByExt = new Map([
   [".html", "text/html; charset=utf-8"],
@@ -527,8 +535,40 @@ const clientHashFromRequest = (req, payload = {}) => {
   return createHash("sha256").update(`${clientId}|${userAgent}|${ip}`).digest("hex").slice(0, 32);
 };
 
+const payloadFromUrlQuery = (req) => {
+  const parsedUrl = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
+  return {
+    clientId: parsedUrl.searchParams.get("clientId") || "",
+    scope: parsedUrl.searchParams.get("scope") || ""
+  };
+};
+
+const ownerIdFromRequest = (req, payload = {}) => clientHashFromRequest(req, payload);
+
 const sourceHashFromImage = (source) =>
   createHash("sha256").update(source.data.slice(0, 16000)).digest("hex").slice(0, 32);
+
+const sourcePreviewDataUrlFromImage = async (source) => {
+  const raw = Buffer.from(source.data, "base64");
+  const sharp = loadSharp();
+  if (!sharp) {
+    return raw.length <= 260000
+      ? `data:${source.mimeType || "image/jpeg"};base64,${source.data}`
+      : "";
+  }
+
+  try {
+    const preview = await sharp(raw)
+      .resize(320, 426, { fit: "inside", withoutEnlargement: true })
+      .jpeg({ quality: 72, mozjpeg: true })
+      .toBuffer();
+    return `data:image/jpeg;base64,${preview.toString("base64")}`;
+  } catch {
+    return raw.length <= 260000
+      ? `data:${source.mimeType || "image/jpeg"};base64,${source.data}`
+      : "";
+  }
+};
 
 const comboFromConsultation = (consultation = {}) => [
   consultation.targetLength || "any",
@@ -549,6 +589,29 @@ const getOpenAiClientQuota = (client = {}) => {
     used,
     remaining: Math.max(0, limit - used),
     resetLabel: getOpenAiQuotaResetLabel()
+  };
+};
+
+const getOpenAiQuotaForPayload = async (req, payload = {}) => {
+  const usage = await readOpenAiUsage();
+  const clientKey = clientHashFromRequest(req, payload);
+  return getOpenAiClientQuota(usage.clients?.[clientKey] || {});
+};
+
+const getGuestSessionState = async (req, payload = {}) => {
+  const ownerId = ownerIdFromRequest(req, payload);
+  const guest = await userMemory.ensureGuest(ownerId);
+  const quota = await getOpenAiQuotaForPayload(req, payload);
+  const generations = await userMemory.listGenerations(ownerId, { scope: payload.scope || "today" });
+
+  return {
+    owner: {
+      type: "guest",
+      id: guest.id,
+      status: guest.status
+    },
+    quota,
+    generations
   };
 };
 
@@ -1305,6 +1368,22 @@ const generateOpenAiUploadRecommendations = async (req, payload) => {
   const styles = Object.keys(openAiVariantPlans).map((variant) =>
     buildOpenAiStyle({ consultation, variant, previewUrl: previewUrls[variant], sessionId })
   );
+  const historyItem = await userMemory.upsertGeneration(ownerIdFromRequest(req, payload), {
+    id: sessionId,
+    status: "recommendations_ready",
+    title: "Recommandations personnalisees",
+    sourceLabel: "Photo personnelle",
+    faceShape: "morphologie personnalisee",
+    consultation,
+    originalImageUrl: await sourcePreviewDataUrlFromImage(source),
+    recommendations: styles.map(style => ({
+      id: style.id,
+      styleName: style.name,
+      previewUrl: style.previewUrl,
+      color: style.color,
+      whyItWorks: style.whyItWorks
+    }))
+  });
 
   return {
     faceShape: "morphologie personnalisee",
@@ -1318,7 +1397,8 @@ const generateOpenAiUploadRecommendations = async (req, payload) => {
     ].join(" "),
     recommendedStyles: styles,
     generationSessionId: sessionId,
-    quota
+    quota,
+    historyItem
   };
 };
 
@@ -1339,8 +1419,7 @@ const generateOpenAiSelectedResult = async (req, payload) => {
   const styleId = safeStyleId(style);
   const urls = await cropOpenAiFinalViews({ sheetBuffer, sessionId: session.sessionId, combo, styleId });
   await markOpenAiFinalSessionUsed(session);
-
-  return {
+  const proposal = {
     id: `openai-final-${styleId}`,
     imageUrl: urls.front,
     styleName: style.name,
@@ -1354,6 +1433,26 @@ const generateOpenAiSelectedResult = async (req, payload) => {
       back: urls.back
     },
     isPreparedAsset: true
+  };
+  const historyItem = await userMemory.upsertGeneration(ownerIdFromRequest(req, payload), {
+    id: session.sessionId,
+    status: "final_ready",
+    selectedProposalKey: style.id,
+    final: {
+      id: proposal.id,
+      imageUrl: proposal.imageUrl,
+      styleName: proposal.styleName,
+      description: proposal.description,
+      whyItWorks: proposal.whyItWorks,
+      color: proposal.color,
+      beardStyle: proposal.beardStyle,
+      additionalViews: proposal.additionalViews
+    }
+  });
+
+  return {
+    ...proposal,
+    historyItem
   };
 };
 
@@ -3135,6 +3234,9 @@ const generateServerImage = async (payload) => {
 };
 
 const handleApi = async (req, res) => {
+  const parsedApiUrl = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
+  const apiPath = parsedApiUrl.pathname;
+
   if (req.method === "GET" && req.url === "/api/health") {
     const apiKey = process.env.GEMINI_API_KEY || process.env.API_KEY || "";
     const hasKey = !isPlaceholderEnvValue(apiKey);
@@ -3185,6 +3287,50 @@ const handleApi = async (req, res) => {
             : "Fallback communautaire"
         : "Service image principal"
     });
+    return true;
+  }
+
+  if (req.method === "POST" && apiPath === "/api/session/guest") {
+    try {
+      const payload = await readJsonBody(req);
+      const session = await getGuestSessionState(req, payload);
+      sendJson(res, 200, { ok: true, ...session });
+    } catch (error) {
+      sendJson(res, error.status || 500, {
+        ok: false,
+        error: error.message || "Session invite indisponible."
+      });
+    }
+    return true;
+  }
+
+  if (req.method === "GET" && apiPath === "/api/me") {
+    try {
+      const payload = payloadFromUrlQuery(req);
+      const session = await getGuestSessionState(req, payload);
+      sendJson(res, 200, { ok: true, ...session });
+    } catch (error) {
+      sendJson(res, error.status || 500, {
+        ok: false,
+        error: error.message || "Profil invite indisponible."
+      });
+    }
+    return true;
+  }
+
+  if (req.method === "GET" && apiPath === "/api/me/generations") {
+    try {
+      const payload = payloadFromUrlQuery(req);
+      const ownerId = ownerIdFromRequest(req, payload);
+      await userMemory.ensureGuest(ownerId);
+      const generations = await userMemory.listGenerations(ownerId, { scope: payload.scope || "today" });
+      sendJson(res, 200, { ok: true, generations });
+    } catch (error) {
+      sendJson(res, error.status || 500, {
+        ok: false,
+        error: error.message || "Historique personnel indisponible."
+      });
+    }
     return true;
   }
 
@@ -3281,6 +3427,11 @@ const handleApi = async (req, res) => {
     try {
       const payload = await readJsonBody(req);
       const generation = await addPublicGeneration(payload);
+      const ownerId = payload.clientId ? ownerIdFromRequest(req, payload) : "";
+      const personalGenerationId = payload.personalGenerationId || payload.generationId || payload.proposal?.id || "";
+      if (ownerId && personalGenerationId) {
+        await userMemory.markPublished(ownerId, personalGenerationId, generation.id);
+      }
       sendJson(res, 200, { ok: true, generation });
     } catch (error) {
       sendJson(res, error.status || 500, {
