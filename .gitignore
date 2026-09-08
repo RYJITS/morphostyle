@@ -8,6 +8,8 @@ pnpm-debug.log*
 lerna-debug.log*
 
 node_modules
+server/models/*.onnx
+server/models/*.onnx.*.download
 dist
 dist-ssr
 *.local
@@ -29,6 +31,8 @@ dist-ssr
 .env.local
 session
 sessions
+!docs/memoire/sessions/
+!docs/memoire/sessions/*.md
 baileys-auth
 .whatsapp-web-profile
 .whatsapp-web-chrome-profile
@@ -80,6 +84,7 @@ public/demo-profiles/*/recommendation-boards/
 public/demo-profiles/*/recommendation-previews/*.png
 public/demo-profiles/*/final-views/*.png
 server/data/openai-daily-usage.json
+server/data/generated-openai/
 server/data/public-generations.json
 server/data/public-gallery/
 server/data/user-memory.json

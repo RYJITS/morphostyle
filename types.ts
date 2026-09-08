@@ -46,12 +46,15 @@ export interface StyleRecommendation {
   referenceCacheKey?: string;
   selected?: boolean;
   previewUrl?: string;
+  assetPreviewUrl?: string;
   resultImageUrl?: string;
   additionalViews?: AdditionalViews;
   isPreparedAsset?: boolean;
   isPreviewLoading?: boolean;
   sourceProvider?: 'openai-upload' | 'alibaba-upload' | 'static-demo';
   generationSessionId?: string;
+  sourceAssetUrl?: string;
+  selectedReferenceAssetUrl?: string;
 }
 
 export interface AnalysisResult {
@@ -62,6 +65,7 @@ export interface AnalysisResult {
   detectedGender: 'male' | 'female' | 'non-binary';
   recommendedStyles: StyleRecommendation[];
   generationSessionId?: string;
+  historyItem?: PublicGeneration;
   quota?: {
     baseLimit?: number;
     bonus?: number;
@@ -72,6 +76,8 @@ export interface AnalysisResult {
   };
 }
 
+export type BackgroundTreatment = 'gray' | 'original';
+
 export interface Proposal {
   id: string;
   imageUrl: string;
@@ -81,12 +87,17 @@ export interface Proposal {
   color: string;
   beardStyle: string;
   additionalViews?: AdditionalViews;
+  assetImageUrl?: string;
+  assetAdditionalViews?: AdditionalViews;
+  historyItem?: PublicGeneration;
+  backgroundTreatment?: BackgroundTreatment;
   isGeneratingAngles?: boolean;
   isPreparedAsset?: boolean;
 }
 
 export interface PublicGeneration {
   id: string;
+  personalGenerationId?: string;
   imageUrl: string;
   styleName: string;
   color: string;
@@ -94,9 +105,30 @@ export interface PublicGeneration {
   sourceLabel: string;
   createdAt: string;
   additionalViews?: AdditionalViews;
+  backgroundTreatment?: BackgroundTreatment;
+  publicImageUrl?: string;
+  publicAdditionalViews?: AdditionalViews;
   consultation?: Partial<ConsultationData>;
   publicGenerationId?: string;
   originalImageUrl?: string;
+  selectedProposalKey?: string;
+  selectedProposalAssetUrl?: string;
+  recommendationSessionId?: string;
+  parentGenerationId?: string;
+  generatedFinalIds?: string[];
+  status?: string;
+  recommendations?: Array<{
+    id?: string;
+    styleName?: string;
+    name?: string;
+    previewUrl?: string;
+    assetPreviewUrl?: string;
+    imageUrl?: string;
+    color?: string;
+    whyItWorks?: string;
+    description?: string;
+    beardStyle?: string;
+  }>;
 }
 
 export enum AppState {

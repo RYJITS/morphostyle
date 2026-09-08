@@ -1,8 +1,18 @@
 # MorphoStyle AI - Assistant de conseil coiffure et style par IA
 
+## Statut de diffusion
+Projet explique sur Site Ma Methode: la fiche publique peut presenter son utilite, ses fonctions, son avancement et ses liens disponibles.
+
 ## Liens vers l'application
-- Lien public: [https://morphostyle.c2rdesign.com](https://morphostyle.c2rdesign.com)
+- Application: [https://morphostyle.c2rdesign.com](https://morphostyle.c2rdesign.com)
 - GitHub: [https://github.com/RYJITS/morphostyle](https://github.com/RYJITS/morphostyle)
+
+## Avancement du projet
+- Etat du projet: pret cote usage public.
+- Fonctionnement: fonctionnel.
+- Securite: OK pour une presentation publique.
+- Ma Methode: fiche explicative visible.
+- Publication externe: GitHub public actif.
 
 ## A quoi sert le projet
 MorphoStyle AI est une application web qui permet de tester une consultation coiffure/visagisme. Elle combine cinq profils demo prepares en base statique et un parcours photo personnelle utilisant OpenAI Image cote serveur. L'objectif est de montrer des recommandations morphologiques realistes sans multiplier les appels API inutiles.
@@ -15,7 +25,13 @@ Le projet a ete reconstruit autour d'une logique economique et controlable: les 
 
 ## Installation et utilisation
 ### Installation
-[object Object]
+Installation locale standard pour la version partageable du projet:
+
+```powershell
+npm install
+npm run build
+npm run dev
+```
 
 ### Utilisation
 Après installation, l'utilisateur accède à l'application via un navigateur web. Il commence par charger une photo de son visage, puis remplit un formulaire de profil (âge, type de visage, préférences). L'application analyse automatiquement la morphologie et propose des styles adaptés. L'utilisateur sélectionne jusqu'à quatre styles, puis l'IA génère des aperçus réalistes en conservant ses caractéristiques uniques. Il peut ensuite demander des angles supplémentaires (profil gauche/droit, dos) pour une visualisation complète. Le système gère automatiquement les erreurs et les retries en cas de saturation du service.
@@ -48,13 +64,11 @@ Après installation, l'utilisateur accède à l'application via un navigateur we
 - Blocage du deuxieme essai journalier cote serveur
 - Validation automatique des ages pour eviter les suggestions inappropriees
 - Conservation automatique de l'identite, de la lumiere et du contexte dans les prompts
-- Memoire projet Markdown dans `docs/memoire/`
-- Cahier d'ajout multi-utilisateur Hostinger dans `docs/architecture/AJOUT_MULTI_UTILISATEUR_HOSTINGER.md`
 
 ## Captures d'ecran
-![Capture 1 - morphostyle](docs/captures/20-morphostyle-2026-06-25_03-17-30-desktop.png)
+![Capture 1 - morphostyle](docs/github-captures/20-morphostyle-2026-08-07_23-11-42-desktop.png)
 
-![Capture 2 - morphostyle](docs/captures/20-morphostyle-2026-06-25_03-17-30-mobile.png)
+![Capture 2 - morphostyle](docs/github-captures/20-morphostyle-2026-08-07_23-11-42-mobile.png)
 
 ## Mises a jour
 - Optimisation des prompts pour une meilleure conservation de l'identité et du contexte dans les aperçus générés

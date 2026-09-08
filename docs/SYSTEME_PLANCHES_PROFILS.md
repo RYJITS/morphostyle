@@ -40,7 +40,6 @@ Total par profil complet:
 Ilia est le premier profil enfant complet.
 Elena est le premier profil senior complet.
 Mark est le premier profil homme mur complet.
-Sam est le premier profil garcon enfant complet.
 Les anciens essais Alibaba de Mark ont ete remplaces dans `public/demo-profiles/marc` par une base non-Alibaba et archives hors du dossier public.
 Mark peut rester un profil de test Alibaba uniquement si les nouveaux fichiers generes ne sont pas actives dans l'application avant validation.
 
@@ -57,13 +56,11 @@ Les prochains profils doivent reprendre exactement ce systeme avant d'etre marqu
 
 Quand le quota API est bloque mais qu'une base demo doit fonctionner sur toutes les selections, utiliser:
 
-`python scripts\expand-static-profile-matrix.py marc sam`
+`python scripts\expand-static-profile-matrix.py marc`
 
 Ce script conserve les planches deja validees, genere les cles manquantes jusqu'a 36 planches par profil, puis il faut lancer:
 
 `python scripts\slice-profile-boards.py marc --strict`
-
-`python scripts\slice-profile-boards.py sam --strict`
 
 Une matrice ne doit etre activee en `all` dans `services/profileLookDatabase.ts` qu'apres obtention des volumes complets:
 
@@ -181,15 +178,15 @@ Planche source:
 
 Miniatures:
 
-`public/demo-profiles/<profil>/recommendation-previews/<longueur>-<entretien>-<univers>-<variant>.png`
+`public/demo-profiles/<profil>/recommendation-previews/<longueur>-<entretien>-<univers>-<variant>.webp`
 
 Fiches resultat:
 
-`public/demo-profiles/<profil>/final-selections/<longueur>-<entretien>-<univers>-<variant>.png`
+Les fiches resultat PNG sont des sources/intermediaires d'atelier et doivent rester archivees hors `public` quand elles ne sont pas appelees par l'application.
 
 Vues finales:
 
-`public/demo-profiles/<profil>/final-views/<longueur>-<entretien>-<univers>-<variant>-<vue>.png`
+`public/demo-profiles/<profil>/final-views/<longueur>-<entretien>-<univers>-<variant>-<vue>.webp`
 
 Variants:
 

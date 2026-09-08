@@ -36,11 +36,6 @@ const profileLifestyleColors: Record<string, Partial<Record<ConsultationData["li
     classic: "Poivre et sel",
     modern: "Cendre naturel",
     bold: "Sel sombre"
-  },
-  sam: {
-    classic: "Brun enfant naturel",
-    modern: "Brun doux",
-    bold: "Brun texture"
   }
 };
 
@@ -51,8 +46,7 @@ const preparedCombinationCoverage: Record<string, PreparedCoverage> = {
   sofia: "all",
   lya: "all",
   elena: "all",
-  marc: "all",
-  sam: "all"
+  marc: "all"
 };
 
 const selectionKey = (data: ConsultationData) =>
@@ -85,7 +79,7 @@ const recommendationPreviewUrl = (
   maintenance: ConsultationData["maintenance"],
   lifestyle: ConsultationData["lifestyle"],
   variant: typeof variants[number]
-) => `/demo-profiles/${assetId}/recommendation-previews/${length}-${maintenance}-${lifestyle}-${variant}.webp?v=morphology-20`;
+) => `/demo-profiles/${assetId}/recommendation-previews/${length}-${maintenance}-${lifestyle}-${variant}.webp?v=morphology-22`;
 
 const finalViewUrl = (
   assetId: string,
@@ -94,14 +88,14 @@ const finalViewUrl = (
   lifestyle: ConsultationData["lifestyle"],
   variant: typeof variants[number],
   view: "front" | "left" | "right" | "back"
-) => `/demo-profiles/${assetId}/final-views/${length}-${maintenance}-${lifestyle}-${variant}-${view}.webp?v=morphology-views-5`;
+) => `/demo-profiles/${assetId}/final-views/${length}-${maintenance}-${lifestyle}-${variant}-${view}.webp?v=morphology-views-6`;
 
 const combinationBoardUrl = (
   assetId: string,
   length: ConsultationData["targetLength"],
   maintenance: ConsultationData["maintenance"],
   lifestyle: ConsultationData["lifestyle"]
-) => `/demo-profiles/${assetId}/combination-boards/${length}-${maintenance}-${lifestyle}.png?v=morphology-19`;
+) => `/demo-profiles/${assetId}/combination-boards/${length}-${maintenance}-${lifestyle}.png?v=morphology-22`;
 
 const hasPreparedFinalBoard = (
   example: DemoExample,
@@ -240,32 +234,6 @@ const profileVariantLabels: Record<string, Partial<Record<ConsultationData["targ
       structured: "Libre contour precis",
       signature: "Libre texture mature"
     }
-  },
-  sam: {
-    short: {
-      primary: "Court enfant classique",
-      soft: "Court rond naturel",
-      structured: "Court ecole net",
-      signature: "Court texture joueur"
-    },
-    medium: {
-      primary: "Mi-court enfant",
-      soft: "Mop top doux",
-      structured: "Coupe bol legere",
-      signature: "Texture mi-longue"
-    },
-    long: {
-      primary: "Long enfant cadre",
-      soft: "Long souple naturel",
-      structured: "Long frange douce",
-      signature: "Long texture enfant"
-    },
-    any: {
-      primary: "Libre court enfant",
-      soft: "Libre mi-court doux",
-      structured: "Libre frange nette",
-      signature: "Libre texture joueur"
-    }
   }
 };
 
@@ -347,32 +315,6 @@ const profileVariantDescriptions: Record<string, Partial<Record<ConsultationData
       structured: "option plus precise sur les contours et la moustache",
       signature: "option texture mature avec presence visuelle plus forte"
     }
-  },
-  sam: {
-    short: {
-      primary: "court classique enfant, facile a replacer et adapte au visage rond",
-      soft: "forme courte plus ronde qui garde un effet naturel sans durcir les traits",
-      structured: "coupe ecole nette avec contour propre, differente du court rond",
-      signature: "texture courte plus vivante, enfantine et simple a entretenir"
-    },
-    medium: {
-      primary: "mi-court enfantin qui degage le regard sans effet adulte",
-      soft: "volume doux sur le dessus avec contour souple autour des joues",
-      structured: "forme plus nette avec frange legere et nuque propre",
-      signature: "texture mi-longue joueuse qui reste simple a recoiffer"
-    },
-    long: {
-      primary: "longueur enfant cadrante, gardee naturelle autour du visage rond",
-      soft: "long souple et doux pour conserver un cote enfantin",
-      structured: "long avec frange douce pour organiser la masse sans durcir",
-      signature: "long texture naturel, vivant mais sans coiffage adulte"
-    },
-    any: {
-      primary: "option libre courte et sure pour le quotidien",
-      soft: "option libre mi-courte avec volume doux",
-      structured: "option libre avec frange nette et contour propre",
-      signature: "option libre texturee, enfantine et facile a vivre"
-    }
   }
 };
 
@@ -395,10 +337,6 @@ const getWhyItWorks = (
 
   if (example.assetId === "marc") {
     return `Adapte au ${example.faceShape}: assume la calvitie marquee, clarifie la barbe et garde une ligne masculine credible avec ${maintenanceLabel}, ${lengthLabel}, style ${lifestyleLabel}.`;
-  }
-
-  if (example.assetId === "sam") {
-    return `Adapte au ${example.faceShape}: degage le regard, garde un volume enfantin et reste facile a vivre avec ${maintenanceLabel}, ${lengthLabel}, style ${lifestyleLabel}.`;
   }
 
   return `Adapte au ${example.faceShape}: ajoute un cadre doux, evite d'elargir les joues et respecte ${maintenanceLabel}, ${lengthLabel}, style ${lifestyleLabel}.`;

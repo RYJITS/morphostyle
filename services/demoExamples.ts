@@ -97,25 +97,5 @@ export const DEMO_EXAMPLES: DemoExample[] = [
     sourceImage: "/demo-profiles/marc/source.png?v=home-profile-v2",
     status: "complete",
     databaseSummary: "36 planches, 144 miniatures, 144 resultats finaux et 576 vues finales"
-  },
-  {
-    id: "sam-enfant",
-    assetId: "sam",
-    name: "Sam",
-    profile: "Garcon de 5 ans, cheveux pas coiffes et mal coupes",
-    role: "Profil enfant valide en base image complete",
-    faceShape: "visage enfant rond",
-    hairTexture: "Cheveu epais ondule, pas coiffe, mal coupe depuis 5 mois",
-    skinTone: "Sous-ton olive clair",
-    consultation: {
-      gender: "male",
-      ageGroup: "child",
-      maintenance: "low",
-      lifestyle: "classic",
-      targetLength: "short"
-    },
-    sourceImage: "/demo-profiles/sam/source.png?v=home-profile-v2",
-    status: "complete",
-    databaseSummary: "36 planches, 144 miniatures, 144 resultats finaux et 576 vues finales"
   }
 ];

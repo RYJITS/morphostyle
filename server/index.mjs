@@ -4,17 +4,32 @@ import { readFile, writeFile, mkdir, rm, stat } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { execFile } from "node:child_process";
 import { createRequire } from "node:module";
-import { createHash } from "node:crypto";
+import { createHash, createHmac, timingSafeEqual, randomBytes } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  authCookieHeader,
+  authTokenFromRequest,
+  clearAuthCookieHeader,
+  publicSessionPayload
+} from "./auth-session.mjs";
+import {
+  applySecurityHeaders,
+  mimeByExt,
+  payloadFromUrlQuery,
+  readJsonBody,
+  resolveInsideDir,
+  sendJson
+} from "./http-utils.mjs";
+import { createPublicGalleryService } from "./public-gallery.mjs";
 import { createUserMemoryStore } from "./user-memory.mjs";
+import { preparePortraitBackground, neutralizePortraits, getPortraitBackgroundStatus } from "./portrait-background.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, "..");
 const require = createRequire(import.meta.url);
 const distDir = path.join(rootDir, "dist");
 const PORT = Number(process.env.PORT || 3000);
-const BODY_LIMIT_BYTES = Number(process.env.REQUEST_BODY_LIMIT_BYTES || 24 * 1024 * 1024);
 const DEFAULT_IMAGE_MODEL = "gemini-3.1-flash-image";
 const DEFAULT_AI_HORDE_MODELS = ["Realistic Vision", "AbsoluteReality", "Dreamshaper", "stable_diffusion"];
 const CENTRAL_ENV_FILE = "D:/00_Cerveau_IA/API/env.Local";
@@ -31,12 +46,15 @@ const DEFAULT_LOCAL_LANDMARK_FACE_RESTORE_SCRIPT = path.join(rootDir, "server", 
 const DEFAULT_LOCAL_REFERENCE_SANITIZE_SCRIPT = path.join(rootDir, "server", "sanitize-reference-preview.py");
 const REFERENCE_SANITIZE_VERSION = "grid-cell-v4";
 const GENERATED_ALIBABA_DIR = path.join(rootDir, "public", "generated-alibaba");
-const GENERATED_OPENAI_DIR = path.join(rootDir, "public", "generated-openai");
 const OPENAI_USAGE_DIR = path.join(rootDir, "server", "data");
+const GENERATED_OPENAI_DIR = path.join(OPENAI_USAGE_DIR, "generated-openai");
+const LEGACY_GENERATED_OPENAI_DIR = path.join(rootDir, "public", "generated-openai");
 const OPENAI_USAGE_FILE = path.join(OPENAI_USAGE_DIR, "openai-daily-usage.json");
 const PUBLIC_GENERATIONS_FILE = path.join(OPENAI_USAGE_DIR, "public-generations.json");
 const PUBLIC_GALLERY_DIR = path.join(OPENAI_USAGE_DIR, "public-gallery");
 const USER_MEMORY_FILE = "user-memory.json";
+const PUBLIC_GENERATION_STORE_LIMIT = Math.max(80, Number(process.env.PUBLIC_GENERATION_STORE_LIMIT || 1000));
+const PUBLIC_GENERATION_RESPONSE_LIMIT = Math.max(12, Number(process.env.PUBLIC_GENERATION_RESPONSE_LIMIT || 240));
 const OPENAI_DAILY_TRIAL_LIMIT = Math.max(1, Number(process.env.OPENAI_DAILY_TRIAL_LIMIT || 1));
 const OPENAI_QUOTA_TIME_ZONE = process.env.OPENAI_QUOTA_TIME_ZONE || "Europe/Zurich";
 const DEFAULT_OPENAI_EXTRA_TRIAL_CODE_HASHES = [
@@ -45,23 +63,339 @@ const DEFAULT_OPENAI_EXTRA_TRIAL_CODE_HASHES = [
 const DEFAULT_LOCAL_PYTHON_EXECUTABLE =
   "D:/00_Cerveau_IA/Conpetances/Video/ComfyUI/ComfyUI_windows_portable/python_embeded/python.exe";
 
-const userMemory = createUserMemoryStore({
-  dataDir: OPENAI_USAGE_DIR,
-  fileName: USER_MEMORY_FILE,
-  timeZone: OPENAI_QUOTA_TIME_ZONE
-});
+let userMemoryStore = null;
+const activeOpenAiGenerationsByOwner = new Map();
 
-const mimeByExt = new Map([
-  [".html", "text/html; charset=utf-8"],
-  [".js", "text/javascript; charset=utf-8"],
-  [".css", "text/css; charset=utf-8"],
-  [".svg", "image/svg+xml"],
-  [".png", "image/png"],
-  [".jpg", "image/jpeg"],
-  [".jpeg", "image/jpeg"],
-  [".webp", "image/webp"],
-  [".ico", "image/x-icon"]
-]);
+const getUserMemory = () => {
+  if (!userMemoryStore) {
+    userMemoryStore = createUserMemoryStore({
+      dataDir: OPENAI_USAGE_DIR,
+      fileName: USER_MEMORY_FILE,
+      timeZone: OPENAI_QUOTA_TIME_ZONE
+    });
+  }
+  return userMemoryStore;
+};
+
+const openAiGenerationOwnerKey = (owner = {}) =>
+  `${owner.type || "user"}:${owner.id || owner.email || "unknown"}`;
+
+const acquireOpenAiGenerationLock = (owner) => {
+  const key = openAiGenerationOwnerKey(owner);
+  if (activeOpenAiGenerationsByOwner.has(key)) {
+    throw Object.assign(
+      new Error("Une generation est deja en cours. Patientez jusqu'au resultat avant d'en lancer une autre."),
+      { status: 409 }
+    );
+  }
+
+  const lockId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+  activeOpenAiGenerationsByOwner.set(key, lockId);
+
+  return () => {
+    if (activeOpenAiGenerationsByOwner.get(key) === lockId) {
+      activeOpenAiGenerationsByOwner.delete(key);
+    }
+  };
+};
+
+const GENERATED_OPENAI_ROUTE_PREFIX = "/generated-openai/";
+
+const getPrivateAssetUrlTtlMs = () =>
+  Math.max(5 * 60 * 1000, Number(process.env.PRIVATE_ASSET_URL_TTL_MS || 24 * 60 * 60 * 1000));
+
+const getPrivateAssetSecret = () =>
+  process.env.MORPHOSTYLE_PRIVATE_ASSET_SECRET ||
+  process.env.PRIVATE_ASSET_SECRET ||
+  process.env.OPENAI_API_KEY ||
+  process.env.API_KEY ||
+  "morphostyle-local-private-assets";
+
+const normalizeGeneratedOpenAiAssetPath = (value = "") => {
+  const raw = String(value || "").trim();
+  if (!raw || raw.includes("\\") || raw.includes("\u0000")) return "";
+
+  try {
+    const parsedUrl = new URL(raw, "http://local");
+    const pathname = decodeURIComponent(parsedUrl.pathname || "");
+    if (!pathname.startsWith(GENERATED_OPENAI_ROUTE_PREFIX)) return "";
+
+    const relativePath = pathname.slice(GENERATED_OPENAI_ROUTE_PREFIX.length);
+    const normalizedRelativePath = path.posix.normalize(relativePath.replace(/\\/g, "/"));
+    if (
+      !normalizedRelativePath ||
+      normalizedRelativePath === "." ||
+      normalizedRelativePath === ".." ||
+      normalizedRelativePath.startsWith("../") ||
+      path.posix.isAbsolute(normalizedRelativePath)
+    ) {
+      return "";
+    }
+
+    return `${GENERATED_OPENAI_ROUTE_PREFIX}${normalizedRelativePath}`;
+  } catch {
+    return "";
+  }
+};
+
+const generatedOpenAiRelativePath = (assetPath = "") =>
+  normalizeGeneratedOpenAiAssetPath(assetPath).slice(GENERATED_OPENAI_ROUTE_PREFIX.length);
+
+const resolveGeneratedOpenAiAssetPath = (assetUrl = "") => {
+  const assetPath = normalizeGeneratedOpenAiAssetPath(assetUrl);
+  if (!assetPath) return "";
+  const relativePath = generatedOpenAiRelativePath(assetPath);
+  const assetDirs = [GENERATED_OPENAI_DIR, LEGACY_GENERATED_OPENAI_DIR];
+
+  for (const baseDir of assetDirs) {
+    const filePath = resolveInsideDir(baseDir, relativePath);
+    if (filePath && existsSync(filePath)) return filePath;
+  }
+
+  return resolveInsideDir(GENERATED_OPENAI_DIR, relativePath);
+};
+
+const generatedOpenAiAssetSignature = (assetPath, expiresAt) =>
+  createHmac("sha256", getPrivateAssetSecret())
+    .update(`${assetPath}\n${expiresAt}`)
+    .digest("hex");
+
+const verifyGeneratedOpenAiAssetSignature = (assetPath, expiresAt, signature = "") => {
+  if (!assetPath || !Number.isFinite(expiresAt) || expiresAt < Date.now()) return false;
+  if (!/^[a-f0-9]{64}$/i.test(String(signature))) return false;
+
+  const expected = generatedOpenAiAssetSignature(assetPath, expiresAt);
+  const expectedBuffer = Buffer.from(expected, "hex");
+  const signatureBuffer = Buffer.from(String(signature), "hex");
+  return expectedBuffer.length === signatureBuffer.length && timingSafeEqual(expectedBuffer, signatureBuffer);
+};
+
+const signGeneratedOpenAiAssetUrl = (value = "") => {
+  const assetPath = normalizeGeneratedOpenAiAssetPath(value);
+  if (!assetPath) return value;
+  const expiresAt = Date.now() + getPrivateAssetUrlTtlMs();
+  const signature = generatedOpenAiAssetSignature(assetPath, expiresAt);
+  return `${assetPath}?expires=${expiresAt}&sig=${signature}`;
+};
+
+const stripGeneratedOpenAiAssetAccess = (value = "") => {
+  const assetPath = normalizeGeneratedOpenAiAssetPath(value);
+  return assetPath || value;
+};
+
+const mapPrivateGeneratedAssetUrls = (value, mapper) => {
+  if (typeof value === "string") return mapper(value);
+  if (Array.isArray(value)) return value.map(item => mapPrivateGeneratedAssetUrls(item, mapper));
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, item]) => [key, mapPrivateGeneratedAssetUrls(item, mapper)])
+    );
+  }
+  return value;
+};
+
+const withPrivateGeneratedAssetAccess = (value) =>
+  mapPrivateGeneratedAssetUrls(value, signGeneratedOpenAiAssetUrl);
+
+const stripPrivateGeneratedAssetAccess = (value) =>
+  mapPrivateGeneratedAssetUrls(value, stripGeneratedOpenAiAssetAccess);
+
+const contentTypeFromImagePath = (filePath = "", fallback = "image/jpeg") =>
+  mimeByExt.get(path.extname(filePath).toLowerCase()) || fallback;
+
+const persistImageAsset = async ({ assetPath = "", buffer, contentType = "", owner = null } = {}) => {
+  const cleanAssetPath = stripGeneratedOpenAiAssetAccess(assetPath);
+  if (!cleanAssetPath || !buffer) return;
+
+  try {
+    await getUserMemory().storeImageAsset({
+      assetPath: cleanAssetPath,
+      ownerType: owner?.type || "",
+      ownerId: owner?.id || "",
+      contentType: contentType || contentTypeFromImagePath(cleanAssetPath),
+      buffer
+    });
+  } catch (error) {
+    console.error(`Sauvegarde image MySQL ignoree pour ${cleanAssetPath}:`, error?.message || error);
+  }
+};
+
+const readPersistedImageAsset = async (assetPath = "") => {
+  try {
+    return await getUserMemory().getImageAsset(stripGeneratedOpenAiAssetAccess(assetPath));
+  } catch (error) {
+    console.error(`Lecture image MySQL impossible pour ${assetPath}:`, error?.message || error);
+    return null;
+  }
+};
+
+const deletePersistedImageAsset = async (assetPath = "") => {
+  const cleanAssetPath = stripGeneratedOpenAiAssetAccess(assetPath);
+  if (!cleanAssetPath) return false;
+
+  try {
+    return await getUserMemory().deleteImageAsset(cleanAssetPath);
+  } catch (error) {
+    console.error(`Suppression image MySQL impossible pour ${cleanAssetPath}:`, error?.message || error);
+    return false;
+  }
+};
+
+const assertGeneratedOpenAiAssetPathOwnedBy = async (assetPath = "", owner = null) => {
+  const cleanAssetPath = normalizeGeneratedOpenAiAssetPath(assetPath);
+  if (!cleanAssetPath || !owner?.type || !owner?.id) return false;
+
+  const store = getUserMemory();
+  const requirePersistedOwner = Boolean(store.mysqlRequired);
+  const persisted = await readPersistedImageAsset(cleanAssetPath);
+  if (!persisted) {
+    if (requirePersistedOwner) {
+      throw Object.assign(new Error("Propriete de l'image personnelle impossible a verifier."), { status: 403 });
+    }
+    return true;
+  }
+
+  const storedOwnerType = String(persisted.ownerType || "").trim();
+  const storedOwnerId = String(persisted.ownerId || "").trim();
+  if (storedOwnerType || storedOwnerId) {
+    if (storedOwnerType !== owner.type || storedOwnerId !== owner.id) {
+      throw Object.assign(new Error("Cette image personnelle ne peut etre lue que depuis son compte createur."), { status: 403 });
+    }
+    return true;
+  }
+
+  if (requirePersistedOwner) {
+    throw Object.assign(new Error("Proprietaire de l'image personnelle manquant."), { status: 403 });
+  }
+  return true;
+};
+
+const canReadGeneratedOpenAiAssetForOwner = async (assetPath = "", owner = null) => {
+  try {
+    return await assertGeneratedOpenAiAssetPathOwnedBy(assetPath, owner);
+  } catch {
+    return false;
+  }
+};
+
+const mapPrivateGeneratedAssetUrlsAsync = async (value, mapper) => {
+  if (typeof value === "string") return mapper(value);
+  if (Array.isArray(value)) return Promise.all(value.map(item => mapPrivateGeneratedAssetUrlsAsync(item, mapper)));
+  if (value && typeof value === "object") {
+    const entries = await Promise.all(
+      Object.entries(value).map(async ([key, item]) => [key, await mapPrivateGeneratedAssetUrlsAsync(item, mapper)])
+    );
+    return Object.fromEntries(entries);
+  }
+  return value;
+};
+
+const signGeneratedOpenAiAssetUrlForOwner = async (value = "", owner = null, accessCache = null) => {
+  const assetPath = normalizeGeneratedOpenAiAssetPath(value);
+  if (!assetPath) return value;
+  if (owner) {
+    if (!accessCache?.has(assetPath)) {
+      accessCache?.set(assetPath, canReadGeneratedOpenAiAssetForOwner(assetPath, owner));
+    }
+    const canRead = accessCache ? await accessCache.get(assetPath) : await canReadGeneratedOpenAiAssetForOwner(assetPath, owner);
+    if (!canRead) return "";
+  }
+  return signGeneratedOpenAiAssetUrl(assetPath);
+};
+
+const stripGeneratedOpenAiAssetAccessForOwner = async (value = "", owner = null, accessCache = null) => {
+  const assetPath = normalizeGeneratedOpenAiAssetPath(value);
+  if (!assetPath) return value;
+  if (owner) {
+    if (!accessCache?.has(assetPath)) {
+      accessCache?.set(assetPath, canReadGeneratedOpenAiAssetForOwner(assetPath, owner));
+    }
+    const canRead = accessCache ? await accessCache.get(assetPath) : await canReadGeneratedOpenAiAssetForOwner(assetPath, owner);
+    if (!canRead) return "";
+  }
+  return assetPath;
+};
+
+const withPrivateGeneratedAssetAccessForOwner = (value, owner) => {
+  const accessCache = new Map();
+  return mapPrivateGeneratedAssetUrlsAsync(value, item => signGeneratedOpenAiAssetUrlForOwner(item, owner, accessCache));
+};
+
+const stripPrivateGeneratedAssetAccessForOwner = (value, owner) => {
+  const accessCache = new Map();
+  return mapPrivateGeneratedAssetUrlsAsync(value, item => stripGeneratedOpenAiAssetAccessForOwner(item, owner, accessCache));
+};
+
+const inlineGeneratedOpenAiAsset = async (assetUrl = "", owner = null) => {
+  const assetPath = normalizeGeneratedOpenAiAssetPath(assetUrl);
+  if (!assetPath) return assetUrl || "";
+  if (owner && !await canReadGeneratedOpenAiAssetForOwner(assetPath, owner)) return "";
+
+  const filePath = resolveGeneratedOpenAiAssetPath(assetPath);
+  try {
+    const buffer = await readFile(filePath);
+    return imageBufferToDataUrl(buffer, contentTypeFromImagePath(filePath));
+  } catch {
+    const stored = await readPersistedImageAsset(assetPath);
+    if (stored?.buffer) {
+      return imageBufferToDataUrl(stored.buffer, stored.contentType || contentTypeFromImagePath(assetPath));
+    }
+  }
+
+  return assetUrl || "";
+};
+
+const imageSourceFromGeneratedOpenAiAsset = async (assetUrl = "", missingMessage = "Image de reference indisponible.", owner = null) => {
+  const assetPath = normalizeGeneratedOpenAiAssetPath(assetUrl);
+  if (!assetPath) {
+    throw Object.assign(new Error(missingMessage), { status: 400 });
+  }
+  if (owner) await assertGeneratedOpenAiAssetPathOwnedBy(assetPath, owner);
+
+  const inlineUrl = await inlineGeneratedOpenAiAsset(assetPath, owner);
+  const { data, mimeType: dataUrlMime } = stripDataUrl(inlineUrl);
+  if (!data || data.length < 100) {
+    throw Object.assign(new Error(missingMessage), { status: 404 });
+  }
+
+  const mimeType = detectMimeType(data, dataUrlMime);
+  return {
+    data,
+    mimeType,
+    dataUrl: `data:${mimeType};base64,${data}`
+  };
+};
+
+const hydratePrivateAssetsForHistoryItem = async (item = {}, owner = null) => {
+  const recommendations = Array.isArray(item.recommendations)
+    ? await Promise.all(item.recommendations.map(async (recommendation) => {
+      const assetUrl = recommendation.assetPreviewUrl || recommendation.previewUrl || recommendation.imageUrl || "";
+      const inlineUrl = await inlineGeneratedOpenAiAsset(assetUrl, owner);
+      return {
+        ...recommendation,
+        previewUrl: inlineUrl || recommendation.previewUrl || "",
+        imageUrl: inlineUrl || recommendation.imageUrl || "",
+        assetPreviewUrl: stripGeneratedOpenAiAssetAccess(assetUrl) || recommendation.assetPreviewUrl || ""
+      };
+    }))
+    : item.recommendations;
+  const additionalViews = item.additionalViews && typeof item.additionalViews === "object"
+    ? Object.fromEntries(await Promise.all(Object.entries(item.additionalViews).map(async ([key, value]) => [
+      key,
+      await inlineGeneratedOpenAiAsset(value, owner)
+    ])))
+    : item.additionalViews;
+  const firstRecommendationImage = recommendations?.[0]?.previewUrl || "";
+  const shouldUseRecommendationCover = item.status === "recommendations_ready" && firstRecommendationImage;
+
+  return {
+    ...item,
+    imageUrl: shouldUseRecommendationCover ? firstRecommendationImage : await inlineGeneratedOpenAiAsset(item.imageUrl, owner),
+    originalImageUrl: await inlineGeneratedOpenAiAsset(item.originalImageUrl, owner),
+    additionalViews,
+    recommendations
+  };
+};
 
 const isPlaceholderEnvValue = (value = "") =>
   !String(value).trim() || /PLACEHOLDER|votre_cle|your_server_key/i.test(String(value));
@@ -80,13 +414,20 @@ const setEnvValue = (key, value) => {
 };
 
 const loadLocalEnv = async () => {
+  const currentDir = process.cwd();
   const files = [
     CENTRAL_ENV_FILE,
     path.join(rootDir, ".env.local"),
-    path.join(rootDir, ".env")
-  ];
+    path.join(rootDir, ".env"),
+    path.join(currentDir, ".env.local"),
+    path.join(currentDir, ".env"),
+    path.join(rootDir, "..", ".env.local"),
+    path.join(rootDir, "..", ".env"),
+    path.join(currentDir, "..", ".env.local"),
+    path.join(currentDir, "..", ".env")
+  ].map((filePath) => path.resolve(filePath));
 
-  for (const filePath of files) {
+  for (const filePath of [...new Set(files)]) {
     if (!existsSync(filePath)) continue;
     const content = await readFile(filePath, "utf8");
     for (const line of content.split(/\r?\n/)) {
@@ -101,174 +442,43 @@ const loadLocalEnv = async () => {
   }
 };
 
-const sendJson = (res, status, payload) => {
-  const body = JSON.stringify(payload);
-  res.writeHead(status, {
-    "Content-Type": "application/json; charset=utf-8",
-    "Content-Length": Buffer.byteLength(body)
-  });
-  res.end(body);
-};
-
-const readJsonBody = (req) =>
-  new Promise((resolve, reject) => {
-    let size = 0;
-    const chunks = [];
-    req.on("data", (chunk) => {
-      size += chunk.length;
-      if (size > BODY_LIMIT_BYTES) {
-        reject(new Error("IMAGE_TOO_LARGE"));
-        req.destroy();
-        return;
-      }
-      chunks.push(chunk);
-    });
-    req.on("end", () => {
-      try {
-        const raw = Buffer.concat(chunks).toString("utf8");
-        resolve(raw ? JSON.parse(raw) : {});
-      } catch {
-        reject(new Error("INVALID_JSON"));
-      }
-    });
-    req.on("error", reject);
-  });
-
 const stripDataUrl = (value = "") => {
   const match = String(value).match(/^data:([^;]+);base64,(.+)$/);
   if (match) return { data: match[2], mimeType: match[1] };
   return { data: String(value), mimeType: "" };
 };
 
-const clampText = (value = "", max = 120) =>
-  String(value || "")
-    .replace(/[\u0000-\u001F\u007F]+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, max);
+const imageBufferToDataUrl = (buffer, contentType = "image/jpeg") =>
+  `data:${contentType};base64,${Buffer.from(buffer).toString("base64")}`;
 
-const isPublishableAssetUrl = (value = "") => {
-  const url = String(value || "").trim();
-  if (!url || url.includes("\\") || url.includes("..")) return false;
-  return [
-    "/public-gallery/",
-    "/generated-openai/",
-    "/generated-alibaba/",
-    "/demo-profiles/"
-  ].some(prefix => url.startsWith(prefix));
-};
-
-const resolvePublishableAssetPath = (assetUrl = "") => {
-  const parsedUrl = new URL(String(assetUrl || ""), "http://local");
-  const requestedPath = decodeURIComponent(parsedUrl.pathname);
-  const pathMap = [
-    ["/public-gallery/", PUBLIC_GALLERY_DIR],
-    ["/generated-openai/", GENERATED_OPENAI_DIR],
-    ["/generated-alibaba/", GENERATED_ALIBABA_DIR],
-    ["/demo-profiles/", path.join(rootDir, "public", "demo-profiles")]
-  ];
-
-  for (const [prefix, baseDir] of pathMap) {
-    if (!requestedPath.startsWith(prefix)) continue;
-    const relativePath = requestedPath.replace(prefix, "");
-    const safePath = path.normalize(relativePath).replace(/^(\.\.[/\\])+/, "");
-    const filePath = path.join(baseDir, safePath);
-    if (filePath.startsWith(baseDir)) return filePath;
-  }
-
-  return "";
-};
-
-const sanitizePublicViews = (views = {}) => {
-  const result = {};
-  for (const key of ["left", "right", "back"]) {
-    const url = String(views?.[key] || "").trim();
-    if (isPublishableAssetUrl(url)) result[key] = url;
-  }
-  return result;
-};
-
-const readPublicGenerations = async () => {
-  try {
-    const parsed = JSON.parse(await readFile(PUBLIC_GENERATIONS_FILE, "utf8"));
-    if (Array.isArray(parsed)) return parsed;
-    if (Array.isArray(parsed?.generations)) return parsed.generations;
-  } catch {
-    // Missing or invalid public gallery: start empty.
-  }
-  return [];
-};
-
-const writePublicGenerations = async (generations) => {
-  await mkdir(OPENAI_USAGE_DIR, { recursive: true });
-  await writeFile(PUBLIC_GENERATIONS_FILE, `${JSON.stringify(generations.slice(0, 80), null, 2)}\n`, "utf8");
-};
-
-const normalizePublicGenerationPayload = (payload = {}) => {
-  const proposal = payload.proposal || {};
-  const imageUrl = String(proposal.imageUrl || "").trim();
-  if (!isPublishableAssetUrl(imageUrl)) {
-    throw Object.assign(new Error("Cette image ne peut pas etre publiee dans la vitrine. Telechargez-la localement si besoin."), { status: 400 });
-  }
-
-  const consultation = payload.consultation || {};
-  const additionalViews = sanitizePublicViews(proposal.additionalViews);
-
-  return {
-    id: `${Date.now().toString(36)}-${createHash("sha1").update(`${imageUrl}-${proposal.styleName || ""}`).digest("hex").slice(0, 10)}`,
-    imageUrl,
-    styleName: clampText(proposal.styleName || "Resultat visagiste", 80),
-    color: clampText(proposal.color || "Naturel", 40),
-    faceShape: clampText(payload.analysis?.faceShape || proposal.faceShape || "Morphologie personnalisee", 70),
-    sourceLabel: clampText(payload.sourceLabel || "Photo personnelle", 50),
-    createdAt: new Date().toISOString(),
-    additionalViews: Object.keys(additionalViews).length ? additionalViews : undefined,
-    consultation: {
-      targetLength: clampText(consultation.targetLength || "", 16),
-      maintenance: clampText(consultation.maintenance || "", 16),
-      lifestyle: clampText(consultation.lifestyle || "", 16),
-      ageGroup: clampText(consultation.ageGroup || "", 16),
-      gender: clampText(consultation.gender || "", 16)
-    }
-  };
-};
-
-const copyPublicGalleryAsset = async (assetUrl, generationId, label) => {
-  if (String(assetUrl || "").startsWith("/public-gallery/")) return assetUrl;
-
-  const sourcePath = resolvePublishableAssetPath(assetUrl);
-  if (!sourcePath) return assetUrl;
-
-  const extension = path.extname(sourcePath).toLowerCase() || ".jpg";
-  const safeLabel = String(label || "image").replace(/[^a-z0-9_-]+/gi, "-").slice(0, 30) || "image";
-  const filename = `${generationId}-${safeLabel}${extension}`;
-  await mkdir(PUBLIC_GALLERY_DIR, { recursive: true });
-  await writeFile(path.join(PUBLIC_GALLERY_DIR, filename), await readFile(sourcePath));
-  return `/public-gallery/${filename}`;
-};
-
-const materializePublicGenerationAssets = async (generation) => {
-  const imageUrl = await copyPublicGalleryAsset(generation.imageUrl, generation.id, "front");
-  const additionalViews = {};
-  for (const [view, url] of Object.entries(generation.additionalViews || {})) {
-    additionalViews[view] = await copyPublicGalleryAsset(url, generation.id, view);
-  }
-
-  return {
-    ...generation,
-    imageUrl,
-    additionalViews: Object.keys(additionalViews).length ? additionalViews : undefined
-  };
-};
-
-const addPublicGeneration = async (payload) => {
-  const generation = await materializePublicGenerationAssets(normalizePublicGenerationPayload(payload));
-  const generations = await readPublicGenerations();
-  const withoutDuplicate = generations.filter(item => item.imageUrl !== generation.imageUrl);
-  const next = [generation, ...withoutDuplicate].slice(0, 80);
-  await writePublicGenerations(next);
-  return generation;
-};
+const {
+  normalizePublicGenerationLimit,
+  readPublicGenerations,
+  addPublicGeneration,
+  removePublicGeneration,
+  findOwnedGenerationForPublication,
+  publicGenerationPayloadFromOwnedGeneration
+} = createPublicGalleryService({
+  openAiUsageDir: OPENAI_USAGE_DIR,
+  publicGenerationsFile: PUBLIC_GENERATIONS_FILE,
+  publicGalleryDir: PUBLIC_GALLERY_DIR,
+  generatedOpenAiRoutePrefix: GENERATED_OPENAI_ROUTE_PREFIX,
+  generatedAlibabaDir: GENERATED_ALIBABA_DIR,
+  demoProfilesDir: path.join(rootDir, "public", "demo-profiles"),
+  publicGenerationStoreLimit: PUBLIC_GENERATION_STORE_LIMIT,
+  publicGenerationResponseLimit: PUBLIC_GENERATION_RESPONSE_LIMIT,
+  resolveInsideDir,
+  resolveGeneratedOpenAiAssetPath,
+  normalizeGeneratedOpenAiAssetPath,
+  stripGeneratedOpenAiAssetAccess,
+  stripPrivateGeneratedAssetAccess,
+  getUserMemory,
+  assertGeneratedOpenAiAssetPathOwnedBy,
+  contentTypeFromImagePath,
+  readPersistedImageAsset,
+  persistImageAsset,
+  deletePersistedImageAsset
+});
 
 const detectMimeType = (base64, fallback = "") => {
   if (fallback) return fallback;
@@ -306,7 +516,13 @@ const normalizeStyle = (style = {}) => ({
   whyItWorks: style.whyItWorks || "",
   faceShape: style.faceShape || "",
   recipe: style.recipe || null,
-  referenceCacheKey: style.referenceCacheKey || ""
+  referenceCacheKey: style.referenceCacheKey || "",
+  previewUrl: style.previewUrl || "",
+  assetPreviewUrl: style.assetPreviewUrl || "",
+  resultImageUrl: style.resultImageUrl || "",
+  sourceProvider: style.sourceProvider || "",
+  generationSessionId: style.generationSessionId || "",
+  selectedReferenceAssetUrl: style.selectedReferenceAssetUrl || ""
 });
 
 const buildHairPrompt = ({ style, gender, ageGroup, angle }) => {
@@ -441,11 +657,46 @@ const consultationLabels = {
   }
 };
 
+const buildProfessionalMorphologyAdvice = (consultation = {}, warning = "") => {
+  const length = consultationLabels.length[consultation.targetLength] || "longueur adaptee";
+  const maintenance = consultationLabels.maintenance[consultation.maintenance] || "entretien adapte";
+  const lifestyle = consultationLabels.lifestyle[consultation.lifestyle] || "style adapte";
+
+  const lengthAdvice = {
+    short: "La longueur courte degage le regard, clarifie la ligne de machoire et evite d'alourdir les traits.",
+    medium: "Le mi-long garde de la douceur autour des joues tout en permettant une vraie structure de coupe.",
+    long: "La longueur longue encadre le visage, accompagne les proportions et apporte du mouvement sans durcir les contours.",
+    any: "La longueur reste ouverte afin de choisir la forme la plus flatteuse pour les proportions visibles du visage."
+  }[consultation.targetLength] || "La longueur est choisie pour equilibrer les volumes visibles du visage.";
+
+  const maintenanceAdvice = {
+    low: "L'entretien rapide privilegie des lignes faciles a replacer et une repousse qui reste propre.",
+    medium: "L'entretien modere permet un resultat plus dessine tout en restant simple a vivre.",
+    high: "Le rituel soigne autorise davantage de precision, de mouvement et de finition."
+  }[consultation.maintenance] || "Le niveau d'entretien garde la coupe realiste pour le quotidien.";
+
+  const lifestyleAdvice = {
+    classic: "L'univers classique apporte une lecture sobre, elegante et durable.",
+    modern: "L'univers moderne donne plus de fraicheur et une silhouette actuelle.",
+    bold: "L'univers signature affirme davantage la personnalite sans perdre l'equilibre du visage."
+  }[consultation.lifestyle] || "L'univers choisi oriente le caractere general de la coupe.";
+
+  return [
+    "Votre morphologie appelle une coupe qui met le regard en valeur, equilibre le front, les pommettes, la machoire et la longueur du cou.",
+    `Avec un choix ${length}, ${maintenance} et un univers ${lifestyle}, les propositions cherchent une forme flatteuse, lisible et credible pour votre visage.`,
+    lengthAdvice,
+    maintenanceAdvice,
+    lifestyleAdvice,
+    "Les quatre options comparent une solution equilibree, une ligne plus douce, une structure plus nette et une signature plus affirmee.",
+    warning ? "Certaines variantes peuvent etre limitees aujourd'hui; les propositions visibles restent prioritaires pour votre choix." : ""
+  ].filter(Boolean).join(" ");
+};
+
 const openAiVariantPlans = {
-  primary: "proposition principale naturelle, tres portable, equilibre morphologique prioritaire",
-  soft: "proposition douce, mouvement naturel, volume leger, entretien realiste",
-  structured: "proposition structuree, lignes plus nettes, silhouette differente de la proposition douce",
-  signature: "proposition signature plus distinctive, toujours realiste et adaptee a l'age"
+  primary: "new balanced morphology-focused haircut, very wearable, visible silhouette change, never the source hairstyle",
+  soft: "new softer haircut, natural movement, light volume, realistic upkeep, clearly different from the source hairstyle",
+  structured: "new structured haircut, cleaner lines, stronger contour, clearly different from the soft option",
+  signature: "new signature haircut, more distinctive but realistic and age-appropriate, clearly different from all other recommendations"
 };
 
 const openAiVariantLabels = {
@@ -454,6 +705,80 @@ const openAiVariantLabels = {
   structured: "Structure nette",
   signature: "Signature controlee"
 };
+
+const openAiLengthConstraint = (targetLength = "") => {
+  switch (targetLength) {
+    case "short":
+      return [
+        "Mandatory length rule: every recommendation must be unmistakably SHORT.",
+        "Transform the source hair into a pixie, crop, bixie or short bob adapted to the face.",
+        "No hair may fall below the jawline or rest on the shoulders. No long layers, no medium-length lob, no unchanged source hairstyle."
+      ].join(" ");
+    case "medium":
+      return [
+        "Mandatory length rule: every recommendation must be clearly MEDIUM length.",
+        "Use chin-to-collarbone haircuts such as lob, layered bob or medium shag adapted to the face.",
+        "Do not create long hair below the collarbone and do not leave the original hairstyle unchanged."
+      ].join(" ");
+    case "long":
+      return [
+        "Mandatory length rule: every recommendation must be clearly LONG.",
+        "Keep length below the collarbone with visible restyling, layers, movement, contouring or fringe adapted to the face.",
+        "Do not copy the source hairstyle without a visible salon transformation."
+      ].join(" ");
+    case "any":
+    default:
+      return [
+        "Length choice rule: choose the most flattering length according to the visible face morphology.",
+        "Every recommendation still needs a clearly visible haircut transformation, not a copy of the uploaded photo."
+      ].join(" ");
+  }
+};
+
+const openAiMaintenanceConstraint = (maintenance = "") => {
+  switch (maintenance) {
+    case "low":
+      return "Maintenance rule: easy daily upkeep, natural fall, no styling that requires long daily work.";
+    case "high":
+      return "Maintenance rule: polished salon finish, precise texture and controlled styling are allowed.";
+    case "medium":
+    default:
+      return "Maintenance rule: balanced upkeep, shaped but realistic for regular daily styling.";
+  }
+};
+
+const openAiLifestyleConstraint = (lifestyle = "") => {
+  switch (lifestyle) {
+    case "classic":
+      return "Style universe: classic, timeless, elegant, natural proportions, no extreme fashion effect.";
+    case "bold":
+      return "Style universe: signature and expressive but still wearable, believable and age-appropriate.";
+    case "modern":
+    default:
+      return "Style universe: modern salon result, current shape, clean but natural finish.";
+  }
+};
+
+const openAiMorphologyInstruction = [
+  "First visually analyze the face morphology from the uploaded portrait: apparent face length, forehead width, cheekbone width, jawline, chin, neck length and global balance.",
+  "Use that morphology to choose volume placement, parting direction, fringe length, side weight and outline.",
+  "Adapt only the haircut to the existing face. Never reshape, rebalance, slim or symmetrize the face itself."
+].join(" ");
+
+const openAiPortraitPreservationInstruction = [
+  "Treat the original uploaded portrait as the photograph to edit, not as inspiration for a new portrait.",
+  "Preserving the original face takes priority over salon presentation or beautification. Change only the requested hair and permitted existing facial-hair grooming.",
+  "Preserve the exact visible facial proportions, eyes, eyelids, eyebrows, nose, lips, jaw, ears, asymmetries, wrinkles, skin texture and apparent age from the original photo.",
+  "Do not smooth skin, retouch the face, rejuvenate, apply makeup, change expression or replace facial details with those of a generic model.",
+  "Keep the original clothing, accessories, background, light direction, shadows, exposure and white balance. Do not introduce a studio background or studio relighting.",
+  "Age, gender and style selections guide only appropriate hair styling; they never override the appearance visible in the original portrait."
+].join(" ");
+
+const openAiNoSourceCopyInstruction = [
+  "Do not return the unedited source hairstyle as a recommendation or final result.",
+  "Preserve the original photograph outside the hair while visibly changing the haircut to the requested length and silhouette.",
+  "A visible hairstyle change must come from the hair alone, never from changing the face, pose, lighting or background."
+].join(" ");
 
 const getOpenAiDailyTrialLimit = () =>
   Math.max(1, Number(process.env.OPENAI_DAILY_TRIAL_LIMIT || OPENAI_DAILY_TRIAL_LIMIT || 1));
@@ -487,12 +812,12 @@ const getOpenAiExtraTrialCodeEntries = () => {
   return [...DEFAULT_OPENAI_EXTRA_TRIAL_CODE_HASHES, ...envCodes];
 };
 
-const isOpenAiExtraTrialCodeValid = (code) => {
+const getEnvOpenAiExtraTrialCodeMatch = (code) => {
   const normalizedCode = normalizeOpenAiTrialCode(code);
-  if (normalizedCode.length < 8) return false;
+  if (normalizedCode.length < 8) return null;
   const codeHash = hashOpenAiTrialCode(normalizedCode);
 
-  return getOpenAiExtraTrialCodeEntries().some((entry) => {
+  const matched = getOpenAiExtraTrialCodeEntries().some((entry) => {
     const rawEntry = String(entry || "").trim();
     if (!rawEntry) return false;
     if (/^sha256:/i.test(rawEntry)) {
@@ -500,6 +825,36 @@ const isOpenAiExtraTrialCodeValid = (code) => {
     }
     return normalizeOpenAiTrialCode(rawEntry) === normalizedCode;
   });
+
+  return matched
+    ? {
+      id: "env-extra",
+      codeHash,
+      usesAdded: getOpenAiExtraTrialUses(),
+      source: "env"
+    }
+    : null;
+};
+
+const resolveOpenAiExtraTrialCode = async (code) => {
+  const normalizedCode = normalizeOpenAiTrialCode(code);
+  if (normalizedCode.length < 8) return null;
+  const codeHash = hashOpenAiTrialCode(normalizedCode);
+
+  const managedCode = await getUserMemory()
+    .findActiveTrialPromoCodeByHash(codeHash)
+    .catch(() => null);
+
+  if (managedCode) {
+    return {
+      id: managedCode.id || "trial-extra",
+      codeHash,
+      usesAdded: Math.max(1, Number(managedCode.usesAdded || 1)),
+      source: "admin"
+    };
+  }
+
+  return getEnvOpenAiExtraTrialCodeMatch(normalizedCode);
 };
 
 const getOpenAiQuotaDate = () =>
@@ -535,39 +890,130 @@ const clientHashFromRequest = (req, payload = {}) => {
   return createHash("sha256").update(`${clientId}|${userAgent}|${ip}`).digest("hex").slice(0, 32);
 };
 
-const payloadFromUrlQuery = (req) => {
-  const parsedUrl = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
-  return {
-    clientId: parsedUrl.searchParams.get("clientId") || "",
-    scope: parsedUrl.searchParams.get("scope") || ""
-  };
+const authenticatedOwnerFromRequest = async (req, payload = {}) => {
+  const token = authTokenFromRequest(req);
+  if (!token) return null;
+  const session = await getUserMemory().getSessionByToken(token);
+  return session?.owner || null;
 };
 
-const ownerIdFromRequest = (req, payload = {}) => clientHashFromRequest(req, payload);
+const guestOwnerFromRequest = (req, payload = {}) => ({
+  type: "guest",
+  id: clientHashFromRequest(req, payload)
+});
+
+const ownerFromRequest = async (req, payload = {}) => {
+  const authenticatedOwner = await authenticatedOwnerFromRequest(req, payload);
+  return authenticatedOwner || guestOwnerFromRequest(req, payload);
+};
+
+const requireAuthenticatedUserOwner = async (
+  req,
+  payload = {},
+  message = "Connexion utilisateur requise."
+) => {
+  const owner = await authenticatedOwnerFromRequest(req, payload);
+  if (!owner || owner.type !== "user") {
+    throw Object.assign(new Error(message), { status: 401 });
+  }
+  return owner;
+};
+
+const requireAdminOwner = async (req, payload = {}) => {
+  const owner = await authenticatedOwnerFromRequest(req, payload);
+  if (!owner) {
+    throw Object.assign(new Error("Connexion administrateur requise."), { status: 401 });
+  }
+  if (owner.role !== "admin") {
+    throw Object.assign(new Error("Acces administrateur refuse."), { status: 403 });
+  }
+  return owner;
+};
+
+const quotaClientKeyFromOwner = (owner, req, payload = {}) =>
+  owner?.type === "user"
+    ? `user:${owner.id}`
+    : `guest:${clientHashFromRequest(req, payload)}`;
+
+const emptyOpenAiUsageClient = () => ({
+  used: 0,
+  sessions: {},
+  bonusTrials: 0,
+  trialCodes: {}
+});
+
+const mergeOpenAiUsageIntoUser = async (req, payload = {}, userOwner) => {
+  if (!userOwner?.id) return;
+  const guestOwner = guestOwnerFromRequest(req, payload);
+  const guestKey = quotaClientKeyFromOwner(guestOwner, req, payload);
+  const userKey = quotaClientKeyFromOwner(userOwner, req, payload);
+  if (guestKey === userKey) return;
+
+  const usage = await readOpenAiUsage();
+  const guest = usage.clients?.[guestKey];
+  if (!guest) return;
+  guest.mergedIntoUsers = guest.mergedIntoUsers || {};
+  if (guest.mergedIntoUsers[userOwner.id]) return;
+
+  const target = usage.clients[userKey] || emptyOpenAiUsageClient();
+  target.sessions = { ...(target.sessions || {}), ...(guest.sessions || {}) };
+  target.trialCodes = target.trialCodes || {};
+
+  let bonusToAdd = Math.max(0, Number(guest.bonusTrials || 0));
+  for (const [codeHash, entry] of Object.entries(guest.trialCodes || {})) {
+    if (target.trialCodes[codeHash]) {
+      bonusToAdd -= Math.max(0, Number(entry?.usesAdded || 0));
+    } else {
+      target.trialCodes[codeHash] = entry;
+    }
+  }
+
+  target.used = Math.max(0, Number(target.used || 0)) + Math.max(0, Number(guest.used || 0));
+  target.bonusTrials = Math.max(0, Number(target.bonusTrials || 0) + Math.max(0, bonusToAdd));
+  guest.mergedIntoUsers[userOwner.id] = new Date().toISOString();
+  usage.clients[userKey] = target;
+  usage.clients[guestKey] = guest;
+  await writeOpenAiUsage(usage);
+};
 
 const sourceHashFromImage = (source) =>
   createHash("sha256").update(source.data.slice(0, 16000)).digest("hex").slice(0, 32);
 
-const sourcePreviewDataUrlFromImage = async (source) => {
+const imageExtensionFromMime = (mimeType = "") => {
+  if (/png/i.test(mimeType)) return ".png";
+  if (/webp/i.test(mimeType)) return ".webp";
+  return ".jpg";
+};
+
+const storePrivateOriginalPreview = async ({ source, sessionId, owner = null }) => {
   const raw = Buffer.from(source.data, "base64");
+  const outDir = path.join(GENERATED_OPENAI_DIR, sessionId);
+  await mkdir(outDir, { recursive: true });
+
   const sharp = loadSharp();
-  if (!sharp) {
-    return raw.length <= 260000
-      ? `data:${source.mimeType || "image/jpeg"};base64,${source.data}`
-      : "";
+  if (sharp) {
+    try {
+      const preview = await sharp(raw)
+        .rotate()
+        .resize(768, 1152, { fit: "inside", withoutEnlargement: true })
+        .jpeg({ quality: 88, mozjpeg: true })
+        .toBuffer();
+      const filename = "original.jpg";
+      await writeFile(path.join(outDir, filename), preview);
+      const assetUrl = `${GENERATED_OPENAI_ROUTE_PREFIX}${sessionId}/${filename}`;
+      await persistImageAsset({ assetPath: assetUrl, buffer: preview, contentType: "image/jpeg", owner });
+      return assetUrl;
+    } catch {
+      // Fallback below keeps the original available even if preview conversion fails.
+    }
   }
 
-  try {
-    const preview = await sharp(raw)
-      .resize(320, 426, { fit: "inside", withoutEnlargement: true })
-      .jpeg({ quality: 72, mozjpeg: true })
-      .toBuffer();
-    return `data:image/jpeg;base64,${preview.toString("base64")}`;
-  } catch {
-    return raw.length <= 260000
-      ? `data:${source.mimeType || "image/jpeg"};base64,${source.data}`
-      : "";
-  }
+  const extension = imageExtensionFromMime(source.mimeType);
+  const filename = `original${extension}`;
+  await writeFile(path.join(outDir, filename), raw);
+  const assetUrl = `${GENERATED_OPENAI_ROUTE_PREFIX}${sessionId}/${filename}`;
+  await persistImageAsset({ assetPath: assetUrl, buffer: raw, contentType: source.mimeType, owner });
+  return assetUrl;
 };
 
 const comboFromConsultation = (consultation = {}) => [
@@ -593,48 +1039,126 @@ const getOpenAiClientQuota = (client = {}) => {
 };
 
 const getOpenAiQuotaForPayload = async (req, payload = {}) => {
+  const owner = await ownerFromRequest(req, payload);
+  return getOpenAiQuotaForOwner(req, payload, owner);
+};
+
+const getOpenAiQuotaForOwner = async (req, payload = {}, owner = null) => {
   const usage = await readOpenAiUsage();
-  const clientKey = clientHashFromRequest(req, payload);
+  const clientKey = quotaClientKeyFromOwner(owner, req, payload);
   return getOpenAiClientQuota(usage.clients?.[clientKey] || {});
 };
 
 const getGuestSessionState = async (req, payload = {}) => {
-  const ownerId = ownerIdFromRequest(req, payload);
-  const guest = await userMemory.ensureGuest(ownerId);
+  const owner = await ownerFromRequest(req, payload);
+  if (owner.type === "guest") await getUserMemory().ensureGuest(owner.id);
   const quota = await getOpenAiQuotaForPayload(req, payload);
-  const generations = await userMemory.listGenerations(ownerId, { scope: payload.scope || "today" });
+  const generations = await getUserMemory().listGenerations(owner, { scope: payload.scope || "today" });
+  const credits = await getUserMemory().getCreditWallet({ ownerType: owner.type, ownerId: owner.id });
 
   return {
     owner: {
-      type: "guest",
-      id: guest.id,
-      status: guest.status
+      type: owner.type,
+      id: owner.id,
+      email: owner.email,
+      status: owner.status || "active",
+      role: owner.role
     },
     quota,
-    generations
+    credits,
+    generations: await withPrivateGeneratedAssetAccessForOwner(generations, owner),
+    storage: getUserMemory().backend
   };
+};
+
+const registerUserAccount = async (req, payload = {}) => {
+  const guestOwner = guestOwnerFromRequest(req, payload);
+  const user = await getUserMemory().createUser({
+    email: payload.email,
+    password: payload.password
+  });
+  await getUserMemory().mergeGuestIntoUser(guestOwner.id, user.id);
+  const session = await getUserMemory().createSession(user.id);
+  await mergeOpenAiUsageIntoUser(req, payload, session.owner);
+  const quota = await getOpenAiQuotaForOwner(req, payload, session.owner);
+  const generations = await getUserMemory().listGenerations(session.owner, { scope: payload.scope || "today" });
+  const credits = await getUserMemory().getCreditWallet({ ownerType: session.owner.type, ownerId: session.owner.id });
+  return {
+    owner: session.owner,
+    token: session.token,
+    expiresAt: session.expiresAt,
+    quota,
+    credits,
+    generations: await withPrivateGeneratedAssetAccessForOwner(generations, session.owner),
+    storage: getUserMemory().backend
+  };
+};
+
+const loginUserAccount = async (req, payload = {}) => {
+  const user = await getUserMemory().verifyUserPassword({
+    email: payload.email,
+    password: payload.password
+  });
+  const session = await getUserMemory().createSession(user.id);
+  const guestOwner = guestOwnerFromRequest(req, payload);
+  await getUserMemory().mergeGuestIntoUser(guestOwner.id, session.owner.id);
+  await mergeOpenAiUsageIntoUser(req, payload, session.owner);
+  const quota = await getOpenAiQuotaForOwner(req, payload, session.owner);
+  const generations = await getUserMemory().listGenerations(session.owner, { scope: payload.scope || "today" });
+  const credits = await getUserMemory().getCreditWallet({ ownerType: session.owner.type, ownerId: session.owner.id });
+  return {
+    owner: session.owner,
+    token: session.token,
+    expiresAt: session.expiresAt,
+    quota,
+    credits,
+    generations: await withPrivateGeneratedAssetAccessForOwner(generations, session.owner),
+    storage: getUserMemory().backend
+  };
+};
+
+const logoutUserAccount = async (req, payload = {}) => {
+  await getUserMemory().deleteSession(authTokenFromRequest(req));
+  return getGuestSessionState(req, payload);
 };
 
 const activateOpenAiExtraTrialCode = async (req, payload = {}) => {
   const normalizedCode = normalizeOpenAiTrialCode(payload.code);
-  if (!isOpenAiExtraTrialCodeValid(normalizedCode)) {
+  const trialCode = await resolveOpenAiExtraTrialCode(normalizedCode);
+  if (!trialCode) {
     throw Object.assign(new Error("Code bonus invalide. Verifiez le code puis reessayez."), { status: 401 });
   }
 
   const usage = await readOpenAiUsage();
-  const clientKey = clientHashFromRequest(req, payload);
+  const owner = await ownerFromRequest(req, payload);
+  const clientKey = quotaClientKeyFromOwner(owner, req, payload);
   const client = usage.clients[clientKey] || { used: 0, sessions: {}, bonusTrials: 0, trialCodes: {} };
-  const codeHash = hashOpenAiTrialCode(normalizedCode);
-  const usesAdded = getOpenAiExtraTrialUses();
+  const codeHash = trialCode.codeHash;
+  const usesAdded = Math.max(1, Number(trialCode.usesAdded || getOpenAiExtraTrialUses()));
   client.sessions = client.sessions || {};
   client.trialCodes = client.trialCodes || {};
-  const alreadyActivated = Boolean(client.trialCodes[codeHash]);
+  const alreadyActivatedToday = Boolean(client.trialCodes[codeHash]);
+  let alreadyActivated = alreadyActivatedToday;
+
+  if (trialCode.source === "admin") {
+    const redemption = await getUserMemory().redeemTrialPromoCodeForOwner({
+      codeHash,
+      ownerType: owner.type,
+      ownerId: owner.id
+    });
+    if (!redemption?.trialCode) {
+      throw Object.assign(new Error("Code bonus invalide. Verifiez le code puis reessayez."), { status: 401 });
+    }
+    alreadyActivated = alreadyActivatedToday || Boolean(redemption.alreadyRedeemed);
+  }
 
   if (!alreadyActivated) {
     client.bonusTrials = Math.max(0, Number(client.bonusTrials || 0)) + usesAdded;
     client.trialCodes[codeHash] = {
       activatedAt: new Date().toISOString(),
-      usesAdded
+      usesAdded,
+      source: trialCode.source || "env",
+      codeId: trialCode.id || ""
     };
     usage.clients[clientKey] = client;
     await writeOpenAiUsage(usage);
@@ -652,53 +1176,264 @@ const activateOpenAiExtraTrialCode = async (req, payload = {}) => {
   };
 };
 
-const reserveOpenAiDailyTrial = async ({ req, payload, sourceHash, combo }) => {
-  const usage = await readOpenAiUsage();
-  const clientKey = clientHashFromRequest(req, payload);
-  const client = usage.clients[clientKey] || { used: 0, sessions: {}, bonusTrials: 0, trialCodes: {} };
-  const beforeQuota = getOpenAiClientQuota(client);
+const openAiCreditReason = (reason, sessionId) =>
+  `${reason}: OpenAI photo personnelle ${sessionId}`.slice(0, 240);
 
-  if (beforeQuota.remaining <= 0) {
-    throw Object.assign(new Error(`Votre essai photo du jour est deja utilise. Revenez ${getOpenAiQuotaResetLabel()} ou utilisez un profil exemple.`), {
-      status: 429,
-      allowCodeActivation: true,
-      quota: beforeQuota
+const refundOpenAiCreditDebit = async ({ owner, sessionId }) => {
+  try {
+    await getUserMemory().adjustCreditsForAdmin({
+      ownerType: owner.type,
+      ownerId: owner.id,
+      amount: 1,
+      reason: openAiCreditReason("refund", sessionId)
     });
+  } catch (error) {
+    console.error("Remboursement credit OpenAI impossible:", error?.message || error);
+  }
+};
+
+const releaseOpenAiReservation = async (reservation) => {
+  if (!reservation?.sessionId) return;
+
+  const client = reservation.usage?.clients?.[reservation.clientKey];
+  if (client?.sessions?.[reservation.sessionId]) {
+    delete client.sessions[reservation.sessionId];
+    if (reservation.countedInDailyTrial) {
+      client.used = Math.max(0, Number(client.used || 0) - 1);
+    }
+    try {
+      await writeOpenAiUsage(reservation.usage);
+    } catch (error) {
+      console.error("Liberation quota OpenAI impossible:", error?.message || error);
+    }
   }
 
+  if (reservation.creditDebited) {
+    await refundOpenAiCreditDebit({
+      owner: reservation.owner,
+      sessionId: reservation.sessionId
+    });
+  }
+};
+
+const reserveOpenAiDailyTrial = async ({ req, payload, sourceHash, combo, owner: providedOwner = null }) => {
+  const usage = await readOpenAiUsage();
+  const owner = providedOwner || await ownerFromRequest(req, payload);
+  const clientKey = quotaClientKeyFromOwner(owner, req, payload);
+  const client = usage.clients[clientKey] || { used: 0, sessions: {}, bonusTrials: 0, trialCodes: {} };
+  const beforeQuota = getOpenAiClientQuota(client);
   const sessionId = `${Date.now().toString(36)}-${createHash("sha1").update(`${clientKey}-${sourceHash}-${combo}`).digest("hex").slice(0, 10)}`;
-  client.used = (client.used || 0) + 1;
+  let creditDebit = null;
+  let quotaSource = "daily_trial";
+  let countedInDailyTrial = false;
+
+  if (beforeQuota.remaining <= 0) {
+    const wallet = await getUserMemory().getCreditWallet({ ownerType: owner.type, ownerId: owner.id });
+    if (Number(wallet.balance || 0) <= 0) {
+      throw Object.assign(new Error(`Votre essai photo du jour est deja utilise. Revenez ${getOpenAiQuotaResetLabel()}, ajoutez un credit ou utilisez un profil exemple.`), {
+        status: 429,
+        allowCodeActivation: true,
+        quota: beforeQuota
+      });
+    }
+
+    creditDebit = await getUserMemory().adjustCreditsForAdmin({
+      ownerType: owner.type,
+      ownerId: owner.id,
+      amount: -1,
+      reason: openAiCreditReason("generation_debit", sessionId)
+    });
+    quotaSource = "credit_wallet";
+  } else {
+    client.used = (client.used || 0) + 1;
+    countedInDailyTrial = true;
+  }
+
   client.sessions = client.sessions || {};
   client.sessions[sessionId] = {
     sourceHash,
     combo,
     finalRemaining: true,
+    quotaSource,
+    countedInDailyTrial,
+    creditDebited: Boolean(creditDebit),
+    creditLedgerEntryId: creditDebit?.entry?.id || "",
     createdAt: new Date().toISOString()
   };
   usage.clients[clientKey] = client;
-  await writeOpenAiUsage(usage);
+  try {
+    await writeOpenAiUsage(usage);
+  } catch (error) {
+    if (creditDebit) {
+      await refundOpenAiCreditDebit({ owner, sessionId });
+    }
+    throw error;
+  }
 
   return {
     sessionId,
-    quota: getOpenAiClientQuota(client)
+    quota: getOpenAiClientQuota(client),
+    usage,
+    clientKey,
+    owner,
+    countedInDailyTrial,
+    creditDebited: Boolean(creditDebit),
+    quotaSource
   };
 };
 
-const getOpenAiFinalSession = async ({ req, payload, sourceHash, combo }) => {
+const privateOpenAiAssetPathFromValues = (...values) =>
+  values
+    .map(value => normalizeGeneratedOpenAiAssetPath(value))
+    .find(Boolean) || "";
+
+const recommendationPreviewAssetPath = (recommendation = {}) =>
+  privateOpenAiAssetPathFromValues(
+    recommendation.assetPreviewUrl,
+    recommendation.previewUrl,
+    recommendation.imageUrl
+  );
+
+const isOpenAiRecommendationHistoryItem = (item = {}) =>
+  Boolean(
+    item &&
+    (item.status === "recommendations_ready" || Array.isArray(item.recommendations)) &&
+    Array.isArray(item.recommendations) &&
+    item.recommendations.some(recommendation => recommendationPreviewAssetPath(recommendation)) &&
+    privateOpenAiAssetPathFromValues(item.originalImageUrl)
+  );
+
+const selectedReferenceAssetPathFromPayload = (payload = {}, style = {}) =>
+  privateOpenAiAssetPathFromValues(
+    payload.selectedReferenceAssetUrl,
+    style.selectedReferenceAssetUrl,
+    style.assetPreviewUrl,
+    style.previewUrl,
+    style.resultImageUrl
+  );
+
+const findOpenAiHistoryItemForSession = async (owner, sessionId) => {
+  if (!sessionId) return null;
+  const generations = await getUserMemory().listGenerations(owner, { scope: "all", limit: 240 });
+  return generations.find(item => (item.personalGenerationId || item.id) === sessionId) || null;
+};
+
+const canResumeOpenAiFinalFromHistory = async ({ owner, sessionId, combo, sourceAssetUrl }) => {
+  if (!sessionId || !sourceAssetUrl) return false;
+  const sourceAssetPath = stripGeneratedOpenAiAssetAccess(sourceAssetUrl);
+  if (!sourceAssetPath) return false;
+
+  try {
+    const historyItem = await findOpenAiHistoryItemForSession(owner, sessionId);
+    if (!isOpenAiRecommendationHistoryItem(historyItem)) return false;
+    if (comboFromConsultation(historyItem.consultation || {}) !== combo) return false;
+
+    const originalAssetPath = stripGeneratedOpenAiAssetAccess(historyItem.originalImageUrl || "");
+    return Boolean(originalAssetPath && originalAssetPath === sourceAssetPath);
+  } catch {
+    return false;
+  }
+};
+
+const assertOpenAiSelectedRecommendationReference = async ({ owner, sessionId, combo, selectedReferenceAssetPath, styleId }) => {
+  if (!selectedReferenceAssetPath) {
+    throw Object.assign(new Error("Image de la proposition selectionnee manquante. Reprenez les recommandations depuis votre fiche resultat puis reessayez."), { status: 400 });
+  }
+
+  const historyItem = await findOpenAiHistoryItemForSession(owner, sessionId);
+  if (!isOpenAiRecommendationHistoryItem(historyItem)) {
+    throw Object.assign(new Error("Recommandations sauvegardees introuvables pour cette finale."), { status: 403 });
+  }
+  if (comboFromConsultation(historyItem.consultation || {}) !== combo) {
+    throw Object.assign(new Error("Les reglages ne correspondent plus aux recommandations initiales."), { status: 403 });
+  }
+
+  const recommendations = Array.isArray(historyItem.recommendations) ? historyItem.recommendations : [];
+  const matchingRecommendation = recommendations.find(recommendation =>
+    recommendationPreviewAssetPath(recommendation) === selectedReferenceAssetPath
+  );
+  if (!matchingRecommendation) {
+    throw Object.assign(new Error("La proposition selectionnee ne correspond pas aux 4 images sauvegardees des recommandations."), { status: 403 });
+  }
+
+  const normalizedStyleId = String(styleId || "").trim();
+  const recommendationId = String(matchingRecommendation.id || "").trim();
+  if (normalizedStyleId && normalizedStyleId !== "style" && recommendationId && normalizedStyleId !== recommendationId) {
+    throw Object.assign(new Error("La proposition selectionnee ne correspond pas au style sauvegarde des recommandations."), { status: 403 });
+  }
+
+  return {
+    historyItem,
+    matchingRecommendation,
+    selectedReferenceAssetPath
+  };
+};
+
+const reserveOpenAiAdditionalFinalCredit = async ({ owner, sessionId }) => {
+  const wallet = await getUserMemory().getCreditWallet({ ownerType: owner.type, ownerId: owner.id });
+  if (Number(wallet.balance || 0) <= 0) {
+    throw Object.assign(new Error("Cette serie a deja produit sa finale incluse. Ajoutez un credit pour generer une autre finale depuis ces recommandations."), {
+      status: 429
+    });
+  }
+
+  const creditDebit = await getUserMemory().adjustCreditsForAdmin({
+    ownerType: owner.type,
+    ownerId: owner.id,
+    amount: -1,
+    reason: openAiCreditReason("finale_supplementaire_debit", sessionId)
+  });
+
+  return {
+    owner,
+    sessionId,
+    creditDebited: true,
+    creditLedgerEntryId: creditDebit?.entry?.id || ""
+  };
+};
+
+const releaseOpenAiAdditionalFinalReservation = async (reservation) => {
+  if (!reservation?.creditDebited) return;
+  await refundOpenAiCreditDebit({
+    owner: reservation.owner,
+    sessionId: reservation.sessionId
+  });
+};
+
+const getOpenAiFinalSession = async ({ req, payload, sourceHash, combo, owner: providedOwner = null }) => {
   const usage = await readOpenAiUsage();
-  const clientKey = clientHashFromRequest(req, payload);
+  const owner = providedOwner || await ownerFromRequest(req, payload);
+  const clientKey = quotaClientKeyFromOwner(owner, req, payload);
   const sessionId = String(payload.generationSessionId || "").trim();
   const client = usage.clients[clientKey];
   const session = client?.sessions?.[sessionId];
+  const historyResumeAllowed = payload.resumeFromHistory
+    ? await canResumeOpenAiFinalFromHistory({
+      owner,
+      sessionId,
+      combo,
+      sourceAssetUrl: payload.sourceAssetUrl
+    })
+    : false;
 
-  if (!sessionId || !session) {
+  if (!sessionId || (!session && !historyResumeAllowed)) {
     throw Object.assign(new Error("Session de generation introuvable. Relancez un essai demain ou choisissez un profil exemple."), { status: 403 });
   }
-  if (!session.finalRemaining) {
-    throw Object.assign(new Error("Le resultat final de cet essai a deja ete genere."), { status: 429 });
+  if (!session && historyResumeAllowed) {
+    const extraFinalReservation = await reserveOpenAiAdditionalFinalCredit({ owner, sessionId });
+    return { usage, clientKey, sessionId, session: null, extraFinalReservation };
   }
   if (session.sourceHash !== sourceHash || session.combo !== combo) {
-    throw Object.assign(new Error("La photo ou les reglages ne correspondent plus a la session initiale."), { status: 403 });
+    if (!historyResumeAllowed) {
+      throw Object.assign(new Error("La photo ou les reglages ne correspondent plus a la session initiale."), { status: 403 });
+    }
+  }
+  if (!session.finalRemaining) {
+    if (!historyResumeAllowed) {
+      throw Object.assign(new Error("Le resultat final de cet essai a deja ete genere."), { status: 429 });
+    }
+    const extraFinalReservation = await reserveOpenAiAdditionalFinalCredit({ owner, sessionId });
+    return { usage, clientKey, sessionId, session, extraFinalReservation };
   }
 
   return { usage, clientKey, sessionId, session };
@@ -708,7 +1443,9 @@ const markOpenAiFinalSessionUsed = async ({ usage, clientKey, sessionId }) => {
   const session = usage.clients?.[clientKey]?.sessions?.[sessionId];
   if (session) {
     session.finalRemaining = false;
-    session.finalGeneratedAt = new Date().toISOString();
+    session.finalCount = Math.max(0, Number(session.finalCount || 0)) + 1;
+    session.finalGeneratedAt = session.finalGeneratedAt || new Date().toISOString();
+    session.lastFinalGeneratedAt = new Date().toISOString();
     await writeOpenAiUsage(usage);
   }
 };
@@ -1017,14 +1754,20 @@ const buildAlibabaStyle = ({ consultation, variant, urls }) => {
   const lifestyle = consultationLabels.lifestyle[consultation.lifestyle] || "personnalise";
   const maintenance = consultationLabels.maintenance[consultation.maintenance] || "entretien adapte";
   const canBeard = consultation.gender === "male" && !["baby", "child", "teen"].includes(consultation.ageGroup);
+  const morphologyAdvice = {
+    primary: "Equilibre les proportions avec une coupe portable et un volume bien place.",
+    soft: "Adoucit les contours avec une ligne souple et un mouvement naturel.",
+    structured: "Dessine plus nettement la silhouette du visage et donne une tenue plus precise.",
+    signature: "Affirme le style tout en gardant une forme adaptee a la morphologie visible."
+  }[variant] || "Adapte la coupe a la morphologie visible du visage.";
 
   return {
     id: `alibaba-upload-${consultation.targetLength}-${consultation.maintenance}-${consultation.lifestyle}-${variant}`,
     name: `${lengthLabelsFr(consultation.targetLength)} ${lifestyle} ${alibabaVariantLabels[variant]}`,
-    description: `Planche haute qualite 2x2, ${length}, ${maintenance}, univers ${lifestyle}.`,
+    description: `Recommandation ${length}, ${maintenance}, univers ${lifestyle}, pensee pour l'equilibre du visage.`,
     color: consultation.gender === "female" ? "Naturel lumineux" : "Naturel",
     beardStyle: canBeard ? "Toilettage barbe adapte" : "Aucune",
-    whyItWorks: `Proposition basee sur la morphologie visible de la photo chargee, avec ${length}, ${maintenance} et univers ${lifestyle}.`,
+    whyItWorks: `${morphologyAdvice} Le choix ${length}, ${maintenance} et l'univers ${lifestyle} gardent la coupe coherente au quotidien.`,
     faceShape: "morphologie personnalisee",
     previewUrl: urls.front,
     resultImageUrl: urls.front,
@@ -1079,11 +1822,7 @@ const generateAlibabaUploadRecommendations = async (payload) => {
     hairTexture: "Texture detectee depuis la photo chargee",
     skinTone: "Teint preserve depuis la photo chargee",
     detectedGender: consultation.gender || "non-binary",
-    professionalAdvice: [
-      `Photo chargee traitee avec la methode haute qualite 2x2.`,
-      `Selection: ${consultationLabels.length[consultation.targetLength] || "longueur adaptee"}, ${consultationLabels.maintenance[consultation.maintenance] || "entretien adapte"}, univers ${consultationLabels.lifestyle[consultation.lifestyle] || "style adapte"}.`,
-      warning ? `Generation partielle: ${warning}` : "Les 4 propositions ont ete generees puis decoupees localement."
-    ].join(" "),
+    professionalAdvice: buildProfessionalMorphologyAdvice(consultation, warning),
     recommendedStyles: styles,
     partial: Boolean(warning)
   };
@@ -1107,6 +1846,7 @@ const openAiErrorText = (payload) => {
 const friendlyOpenAiError = (payload, fallbackStatus) => {
   const code = payload?.error?.code || payload?.code || "";
   const type = payload?.error?.type || "";
+  const raw = `${code} ${type} ${openAiErrorText(payload)}`;
   if (fallbackStatus === 401 || code === "invalid_api_key") {
     return {
       status: 401,
@@ -1119,6 +1859,15 @@ const friendlyOpenAiError = (payload, fallbackStatus) => {
       message: "Le service image refuse la generation pour une limite de quota ou de debit. Reessayez plus tard."
     };
   }
+  if (
+    fallbackStatus === 400 ||
+    /invalid_image|unsupported_image|image_file|failed_to_process|content_policy|safety|moderation/i.test(raw)
+  ) {
+    return {
+      status: fallbackStatus || 400,
+      message: "Cette photo n'a pas pu etre traitee. Essayez un portrait net JPG ou PNG, avec une seule personne bien visible."
+    };
+  }
   return {
     status: fallbackStatus || 502,
     message: `Service image indisponible: ${openAiErrorText(payload)}`
@@ -1128,16 +1877,90 @@ const friendlyOpenAiError = (payload, fallbackStatus) => {
 const imageExtensionForMime = (mimeType = "") =>
   mimeType.includes("png") ? "png" : mimeType.includes("webp") ? "webp" : "jpg";
 
-const buildOpenAiImageForm = ({ source, prompt, size }) => {
+const normalizeOpenAiInputMimeType = (mimeType = "") => {
+  const normalized = String(mimeType || "").trim().toLowerCase();
+  if (normalized === "image/jpg") return "image/jpeg";
+  if (["image/jpeg", "image/png", "image/webp"].includes(normalized)) return normalized;
+  return "";
+};
+
+const prepareOpenAiSourceImage = async (source = {}) => {
+  const raw = Buffer.from(source.data || "", "base64");
+  if (!raw.length) {
+    throw Object.assign(new Error("Photo chargee vide ou illisible."), { status: 400 });
+  }
+
+  const acceptedMime = normalizeOpenAiInputMimeType(source.mimeType);
+  const maxDirectBytes = Number(process.env.OPENAI_SOURCE_MAX_BYTES || 8 * 1024 * 1024);
+  if (acceptedMime && raw.length <= maxDirectBytes) {
+    return {
+      buffer: raw,
+      mimeType: acceptedMime,
+      extension: imageExtensionForMime(acceptedMime)
+    };
+  }
+
+  const sharp = loadSharp();
+  if (!sharp) {
+    if (acceptedMime) {
+      return {
+        buffer: raw,
+        mimeType: acceptedMime,
+        extension: imageExtensionForMime(acceptedMime)
+      };
+    }
+    throw Object.assign(
+      new Error("Cette photo doit etre au format JPG, PNG ou WebP pour etre traitee."),
+      { status: 400 }
+    );
+  }
+
+  try {
+    const converted = await sharp(raw)
+      .rotate()
+      .resize(1536, 1536, { fit: "inside", withoutEnlargement: true })
+      .jpeg({ quality: 92, mozjpeg: true })
+      .toBuffer();
+
+    return {
+      buffer: converted,
+      mimeType: "image/jpeg",
+      extension: "jpg"
+    };
+  } catch {
+    throw Object.assign(
+      new Error("Cette photo n'a pas pu etre preparee. Essayez un portrait JPG ou PNG plus net."),
+      { status: 400 }
+    );
+  }
+};
+
+const appendOpenAiImageFormField = async (form, source, filenamePrefix = "source", fieldName = "image") => {
+  const preparedSource = await prepareOpenAiSourceImage(source);
+  form.append(
+    fieldName,
+    new Blob([preparedSource.buffer], { type: preparedSource.mimeType }),
+    `${filenamePrefix}.${preparedSource.extension}`
+  );
+};
+
+const buildOpenAiImageForm = async ({ source, prompt, size, referenceImages = [] }) => {
   const model = process.env.OPENAI_IMAGE_MODEL || "gpt-image-2";
   const quality = process.env.OPENAI_IMAGE_QUALITY || "medium";
   const outputFormat = process.env.OPENAI_IMAGE_OUTPUT_FORMAT || "png";
   const form = new FormData();
-  const imageBuffer = Buffer.from(source.data, "base64");
-  const extension = imageExtensionForMime(source.mimeType);
+  const imageFieldName = referenceImages.length ? "image[]" : "image";
 
   form.append("model", model);
-  form.append("image", new Blob([imageBuffer], { type: source.mimeType }), `source.${extension}`);
+  await appendOpenAiImageFormField(form, source, "source", imageFieldName);
+  for (const [index, reference] of referenceImages.entries()) {
+    await appendOpenAiImageFormField(
+      form,
+      reference.source || reference,
+      reference.filenamePrefix || `reference-${index + 1}`,
+      imageFieldName
+    );
+  }
   form.append("prompt", prompt);
   form.append("size", size);
   form.append("n", "1");
@@ -1147,7 +1970,7 @@ const buildOpenAiImageForm = ({ source, prompt, size }) => {
   return form;
 };
 
-const callOpenAiImageEdit = async ({ source, prompt, size }) => {
+const callOpenAiImageEdit = async ({ source, prompt, size, referenceImages = [] }) => {
   const apiKey = getOpenAiApiKey();
   if (isPlaceholderEnvValue(apiKey)) {
     throw Object.assign(new Error("Cle du service image manquante cote serveur."), { status: 503 });
@@ -1158,7 +1981,7 @@ const callOpenAiImageEdit = async ({ source, prompt, size }) => {
     headers: {
       Authorization: `Bearer ${apiKey}`
     },
-    body: buildOpenAiImageForm({ source, prompt, size })
+    body: await buildOpenAiImageForm({ source, prompt, size, referenceImages })
   });
 
   const text = await response.text();
@@ -1207,19 +2030,32 @@ const buildOpenAiRecommendationPrompt = ({ consultation = {} }) => {
   const lifestyle = consultationLabels.lifestyle[consultation.lifestyle] || "style adapte";
   const gender = consultationLabels.gender[consultation.gender] || "personne";
   const age = consultationLabels.age[consultation.ageGroup] || "adulte";
+  const lengthConstraint = openAiLengthConstraint(consultation.targetLength);
+  const maintenanceConstraint = openAiMaintenanceConstraint(consultation.maintenance);
+  const lifestyleConstraint = openAiLifestyleConstraint(consultation.lifestyle);
   const isYoung = ["baby", "child", "teen"].includes(consultation.ageGroup);
   const facialHairInstruction = consultation.gender === "male" && !isYoung
     ? "If facial hair exists in the source, adapt beard/moustache grooming naturally. Do not add facial hair if the source has none."
     : "Do not add facial hair.";
 
   return [
-    "Create one single high-resolution photorealistic salon contact sheet image in portrait orientation, exactly 4 columns by 4 rows.",
-    "Use the uploaded portrait as identity reference. Preserve the same person, age, face structure, skin tone, expression and believable morphology.",
+    "Create one single photorealistic hairstyle comparison sheet in portrait orientation, exactly 2 columns by 2 rows, four images total.",
+    openAiPortraitPreservationInstruction,
+    openAiMorphologyInstruction,
+    openAiNoSourceCopyInstruction,
     `User context: ${age} ${gender}. Exact selection: ${length}, ${maintenance}, univers ${lifestyle}.`,
-    "The four columns are four clearly different haircut recommendations based on face morphology and the selected criteria.",
-    "Column 1 = natural balanced option. Column 2 = softer option. Column 3 = more structured option. Column 4 = signature but realistic option.",
-    "Rows: row 1 front identity-photo style portrait, row 2 true left profile, row 3 true right profile that is not a mirror duplicate, row 4 back view focused on haircut shape.",
-    "Every cell must be portrait identity-photo framing, centered head and shoulders, neutral gray studio background.",
+    lengthConstraint,
+    maintenanceConstraint,
+    lifestyleConstraint,
+    "The requested length is not optional. If the source hairstyle conflicts with the requested length, override the source hairstyle and cut/restyle it visibly.",
+    "The four cells are four clearly different haircut recommendations based on face morphology and the selected criteria.",
+    `Top-left = ${openAiVariantPlans.primary}.`,
+    `Top-right = ${openAiVariantPlans.soft}.`,
+    `Bottom-left = ${openAiVariantPlans.structured}.`,
+    `Bottom-right = ${openAiVariantPlans.signature}.`,
+    "In all four cells, keep the source portrait's exact head tilt, camera angle, perspective, expression and framing. Do not straighten or rotate the head into a passport-photo pose.",
+    "Show only the source camera view with a different haircut in each cell. Do not generate side or back views at this recommendation stage.",
+    "Keep the whole hairstyle visible, with matching framing and scale in all four cells. Preserve natural hair color including gray strands.",
     "Respect the age group; never use adult styling on children.",
     facialHairInstruction,
     "No text, no labels, no watermark, no logo, no outer white border.",
@@ -1227,36 +2063,51 @@ const buildOpenAiRecommendationPrompt = ({ consultation = {} }) => {
   ].join("\n");
 };
 
-const buildOpenAiFinalPrompt = ({ consultation = {}, style = {} }) => {
+const buildOpenAiFinalPrompt = ({ consultation = {}, style = {}, hasSelectedReference = false }) => {
   const length = consultationLabels.length[consultation.targetLength] || "longueur adaptee";
   const maintenance = consultationLabels.maintenance[consultation.maintenance] || "entretien adapte";
   const lifestyle = consultationLabels.lifestyle[consultation.lifestyle] || "style adapte";
   const gender = consultationLabels.gender[consultation.gender] || "personne";
   const age = consultationLabels.age[consultation.ageGroup] || "adulte";
   const normalizedStyle = normalizeStyle(style);
+  const lengthConstraint = openAiLengthConstraint(consultation.targetLength);
+  const maintenanceConstraint = openAiMaintenanceConstraint(consultation.maintenance);
+  const lifestyleConstraint = openAiLifestyleConstraint(consultation.lifestyle);
   const isYoung = ["baby", "child", "teen"].includes(consultation.ageGroup);
   const facialHairInstruction = normalizedStyle.beardStyle && !/aucune|n\/a|none/i.test(normalizedStyle.beardStyle) && !isYoung
     ? `Adapt facial hair naturally only if it already exists. Target facial hair: ${normalizedStyle.beardStyle}.`
     : "Do not add facial hair.";
 
   return [
-    "Create one single high-resolution photorealistic salon result sheet image in portrait orientation, exactly 2 columns by 2 rows.",
-    "Use the uploaded portrait as identity reference. Preserve the same person, age, face structure, skin tone, expression and believable morphology.",
+    "Create one single photorealistic hairstyle result sheet in portrait orientation, exactly 2 columns by 2 rows.",
+    "Input image 1 is the user's original portrait and is the sole authority for the person's face and photographic appearance.",
+    openAiPortraitPreservationInstruction,
+    hasSelectedReference
+      ? "Input image 2 is the exact recommendation selected by the user. Use only its haircut as the visual blueprint: same silhouette, length, fringe, side weight, volume, texture and finish. Ignore its face, skin, expression, pose, clothing, background and lighting; those must come from image 1. Never blend or average the two faces. Do not switch to another recommendation."
+      : "",
+    openAiMorphologyInstruction,
+    openAiNoSourceCopyInstruction,
     `Selected haircut: ${normalizedStyle.name}.`,
     `Hair description: ${normalizedStyle.description}. Hair color: ${normalizedStyle.color}.`,
     `User context: ${age} ${gender}. Exact selection: ${length}, ${maintenance}, univers ${lifestyle}.`,
+    lengthConstraint,
+    maintenanceConstraint,
+    lifestyleConstraint,
+    "The requested length and selected haircut are mandatory; do not keep the uploaded hairstyle if it does not match.",
     normalizedStyle.whyItWorks ? `Morphology objective: ${normalizedStyle.whyItWorks}.` : "",
     facialHairInstruction,
-    "Grid structure: top-left front view, top-right true left profile, bottom-left true right profile not mirrored, bottom-right back view.",
+    "Grid structure: top-left source camera view, top-right left three-quarter view, bottom-left right three-quarter view not mirrored, bottom-right back view.",
+    "For the two side views, use a gentle turn of about 45 degrees, keeping both eyes visible where possible. Do not invent a strict 90-degree profile from this single source portrait.",
+    "Top-left is the primary comparison portrait: edit image 1's hair while preserving its exact head tilt, camera angle, perspective, expression and framing. Do not rotate or straighten it into a new frontal pose.",
+    "The other three cells are inferred hairstyle views from the available portrait, not observed photographs. Change viewpoint only in those cells, preserve visible facial details where supported, and prioritize showing the haircut without beautifying the face.",
     "All four views must show the same selected haircut consistently.",
-    "Every cell must be portrait identity-photo framing, centered head and shoulders, neutral gray studio background.",
-    "Keep realistic skin texture, individual hair strands and natural studio light.",
+    "Keep the whole hairstyle visible at a consistent portrait scale. Preserve image 1's photographic setting and natural skin texture, with realistic individual hair strands.",
     "No text, no labels, no watermark, no logo, no outer white border.",
     "Use only thin internal dividers and fill the entire image with the grid."
   ].filter(Boolean).join("\n");
 };
 
-const cropOpenAiRecommendationPreviews = async ({ sheetBuffer, sessionId, combo }) => {
+const cropOpenAiRecommendationPreviews = async ({ sheetBuffer, sessionId, combo, owner = null }) => {
   const sharp = loadSharp();
   if (!sharp) {
     throw Object.assign(new Error("Outil de decoupage indisponible pour preparer la planche."), { status: 503 });
@@ -1265,19 +2116,22 @@ const cropOpenAiRecommendationPreviews = async ({ sheetBuffer, sessionId, combo 
   const metadata = await sharp(sheetBuffer).metadata();
   const width = metadata.width || 1024;
   const height = metadata.height || 1536;
-  const cellW = Math.floor(width / 4);
-  const cellH = Math.floor(height / 4);
+  // Quatre propositions en 2x2 ; les anciennes recommandations conservent leurs crops deja stockes.
+  const cellW = Math.floor(width / 2);
+  const cellH = Math.floor(height / 2);
   const inset = Math.max(4, Math.round(Math.min(width, height) * 0.004));
   const outDir = path.join(GENERATED_OPENAI_DIR, sessionId);
   await mkdir(outDir, { recursive: true });
   await writeFile(path.join(outDir, `${combo}-recommendations-sheet.png`), sheetBuffer);
 
-  const urls = {};
+  const assets = {};
   for (const [index, variant] of Object.keys(openAiVariantPlans).entries()) {
-    const left = index * cellW + inset;
-    const top = inset;
-    const cropWidth = (index === 3 ? width - index * cellW : cellW) - inset * 2;
-    const cropHeight = cellH - inset * 2;
+    const column = index % 2;
+    const row = Math.floor(index / 2);
+    const left = column * cellW + inset;
+    const top = row * cellH + inset;
+    const cropWidth = (column === 1 ? width - cellW : cellW) - inset * 2;
+    const cropHeight = (row === 1 ? height - cellH : cellH) - inset * 2;
     const buffer = await sharp(sheetBuffer)
       .extract({ left, top, width: cropWidth, height: cropHeight })
       .resize(768, 1152, { fit: "cover", position: "center" })
@@ -1285,13 +2139,18 @@ const cropOpenAiRecommendationPreviews = async ({ sheetBuffer, sessionId, combo 
       .toBuffer();
     const filename = `${combo}-recommendation-${variant}.jpg`;
     await writeFile(path.join(outDir, filename), buffer);
-    urls[variant] = `/generated-openai/${sessionId}/${filename}`;
+    const assetUrl = `/generated-openai/${sessionId}/${filename}`;
+    await persistImageAsset({ assetPath: assetUrl, buffer, contentType: "image/jpeg", owner });
+    assets[variant] = {
+      assetUrl,
+      displayUrl: imageBufferToDataUrl(buffer, "image/jpeg")
+    };
   }
 
-  return urls;
+  return assets;
 };
 
-const cropOpenAiFinalViews = async ({ sheetBuffer, sessionId, combo, styleId }) => {
+const cropOpenAiFinalViews = async ({ sheetBuffer, sessionId, combo, styleId, owner = null }) => {
   const sharp = loadSharp();
   if (!sharp) {
     throw Object.assign(new Error("Outil de decoupage indisponible pour preparer la planche."), { status: 503 });
@@ -1313,19 +2172,33 @@ const cropOpenAiFinalViews = async ({ sheetBuffer, sessionId, combo, styleId }) 
   await mkdir(outDir, { recursive: true });
   await writeFile(path.join(outDir, `${combo}-${styleId}-final-sheet.png`), sheetBuffer);
 
-  const urls = {};
-  for (const [view, box] of Object.entries(views)) {
-    const buffer = await sharp(sheetBuffer)
+  // Le detourage fait partie de la finale : les memes pixels sont affiches et persistes.
+  // Garder les recommandations dans leur decor pour la reference de coupe suivante.
+  const crops = [];
+  for (const box of Object.values(views)) {
+    crops.push(await sharp(sheetBuffer)
       .extract(box)
       .resize(768, 1152, { fit: "cover", position: "center" })
+      .png()
+      .toBuffer());
+  }
+  const { buffers, backgroundTreatment } = await neutralizePortraits(crops);
+  const assets = {};
+  for (const [index, view] of Object.keys(views).entries()) {
+    const buffer = await sharp(buffers[index])
       .jpeg({ quality: 92, mozjpeg: true })
       .toBuffer();
     const filename = `${combo}-${styleId}-${view}.jpg`;
     await writeFile(path.join(outDir, filename), buffer);
-    urls[view] = `/generated-openai/${sessionId}/${filename}`;
+    const assetUrl = `/generated-openai/${sessionId}/${filename}`;
+    await persistImageAsset({ assetPath: assetUrl, buffer, contentType: "image/jpeg", owner });
+    assets[view] = {
+      assetUrl,
+      displayUrl: imageBufferToDataUrl(buffer, "image/jpeg")
+    };
   }
 
-  return urls;
+  return { assets, backgroundTreatment };
 };
 
 const buildOpenAiStyle = ({ consultation, variant, previewUrl, sessionId }) => {
@@ -1333,14 +2206,20 @@ const buildOpenAiStyle = ({ consultation, variant, previewUrl, sessionId }) => {
   const lifestyle = consultationLabels.lifestyle[consultation.lifestyle] || "personnalise";
   const maintenance = consultationLabels.maintenance[consultation.maintenance] || "entretien adapte";
   const canBeard = consultation.gender === "male" && !["baby", "child", "teen"].includes(consultation.ageGroup);
+  const morphologyAdvice = {
+    primary: "Equilibre les proportions du visage avec une ligne portable et un volume mesure.",
+    soft: "Adoucit les contours du visage avec une ligne souple et un mouvement naturel.",
+    structured: "Structure la silhouette du visage avec des contours plus nets et un volume mieux place.",
+    signature: "Affirme le style tout en gardant une forme credible pour la morphologie visible."
+  }[variant] || "Adapte la coupe a la morphologie visible du visage.";
 
   return {
     id: `openai-upload-${consultation.targetLength}-${consultation.maintenance}-${consultation.lifestyle}-${variant}`,
     name: `${lengthLabelsFr(consultation.targetLength)} ${lifestyle} ${openAiVariantLabels[variant]}`,
-    description: `Proposition issue de la planche 4x4: ${length}, ${maintenance}, univers ${lifestyle}.`,
+    description: `Recommandation ${length}, ${maintenance}, univers ${lifestyle}, ajustee a l'equilibre du visage.`,
     color: consultation.gender === "female" ? "Naturel lumineux" : "Naturel",
     beardStyle: canBeard ? "Toilettage barbe adapte" : "Aucune",
-    whyItWorks: `Proposition basee sur la morphologie visible de la photo chargee, avec ${length}, ${maintenance} et univers ${lifestyle}.`,
+    whyItWorks: `${morphologyAdvice} Le choix ${length}, ${maintenance} et l'univers ${lifestyle} gardent la coupe coherente au quotidien.`,
     faceShape: "morphologie personnalisee",
     previewUrl,
     sourceProvider: "openai-upload",
@@ -1352,108 +2231,253 @@ const safeStyleId = (style = {}) =>
   String(style.id || "style").replace(/[^a-z0-9_-]+/gi, "-").replace(/^-+|-+$/g, "").slice(0, 80) || "style";
 
 const generateOpenAiUploadRecommendations = async (req, payload) => {
-  const source = imageDataUrlFromPayload(payload);
-  const consultation = payload.consultation || {};
-  const combo = comboFromConsultation(consultation);
-  const sourceHash = sourceHashFromImage(source);
-  const { sessionId, quota } = await reserveOpenAiDailyTrial({ req, payload, sourceHash, combo });
-  const prompt = buildOpenAiRecommendationPrompt({ consultation });
-  const size = process.env.OPENAI_RECOMMENDATION_SIZE || process.env.OPENAI_IMAGE_SIZE || "1024x1536";
-  const result = await callOpenAiImageEdit({ source, prompt, size });
-  const generatedImage = openAiImageFromResponse(result);
-  if (!generatedImage) throw Object.assign(new Error(`Le service image n'a pas retourne d'image: ${openAiErrorText(result)}`), { status: 502 });
-
-  const sheetBuffer = await downloadOpenAiImageBuffer(generatedImage);
-  const previewUrls = await cropOpenAiRecommendationPreviews({ sheetBuffer, sessionId, combo });
-  const styles = Object.keys(openAiVariantPlans).map((variant) =>
-    buildOpenAiStyle({ consultation, variant, previewUrl: previewUrls[variant], sessionId })
+  const historyOwner = await requireAuthenticatedUserOwner(
+    req,
+    payload,
+    "Connexion requise pour utiliser une photo personnelle."
   );
-  const historyItem = await userMemory.upsertGeneration(ownerIdFromRequest(req, payload), {
-    id: sessionId,
-    status: "recommendations_ready",
-    title: "Recommandations personnalisees",
-    sourceLabel: "Photo personnelle",
-    faceShape: "morphologie personnalisee",
-    consultation,
-    originalImageUrl: await sourcePreviewDataUrlFromImage(source),
-    recommendations: styles.map(style => ({
-      id: style.id,
-      styleName: style.name,
-      previewUrl: style.previewUrl,
-      color: style.color,
-      whyItWorks: style.whyItWorks
-    }))
-  });
+  const releaseGenerationLock = acquireOpenAiGenerationLock(historyOwner);
 
-  return {
-    faceShape: "morphologie personnalisee",
-    hairTexture: "Texture detectee depuis la photo chargee",
-    skinTone: "Teint preserve depuis la photo chargee",
-    detectedGender: consultation.gender || "non-binary",
-    professionalAdvice: [
-      "Photo personnelle traitee avec une generation personnalisee.",
-      `Selection: ${consultationLabels.length[consultation.targetLength] || "longueur adaptee"}, ${consultationLabels.maintenance[consultation.maintenance] || "entretien adapte"}, univers ${consultationLabels.lifestyle[consultation.lifestyle] || "style adapte"}.`,
-      "Les 4 propositions viennent d'une seule planche 4x4. La coupe choisie generera ensuite une planche finale incluse dans l'essai du jour."
-    ].join(" "),
-    recommendedStyles: styles,
-    generationSessionId: sessionId,
-    quota,
-    historyItem
-  };
+  try {
+    const source = imageDataUrlFromPayload(payload);
+    const consultation = payload.consultation || {};
+    const combo = comboFromConsultation(consultation);
+    const sourceHash = sourceHashFromImage(source);
+    const reservation = await reserveOpenAiDailyTrial({ req, payload, sourceHash, combo, owner: historyOwner });
+    const { sessionId, quota } = reservation;
+
+    try {
+      const prompt = buildOpenAiRecommendationPrompt({ consultation });
+      const size = process.env.OPENAI_RECOMMENDATION_SIZE || process.env.OPENAI_IMAGE_SIZE || "1024x1536";
+      const result = await callOpenAiImageEdit({ source, prompt, size });
+      const generatedImage = openAiImageFromResponse(result);
+      if (!generatedImage) throw Object.assign(new Error(`Le service image n'a pas retourne d'image: ${openAiErrorText(result)}`), { status: 502 });
+
+      const sheetBuffer = await downloadOpenAiImageBuffer(generatedImage);
+      const previewAssets = await cropOpenAiRecommendationPreviews({ sheetBuffer, sessionId, combo, owner: historyOwner });
+      const originalImageUrl = await storePrivateOriginalPreview({ source, sessionId, owner: historyOwner });
+      const storedStyles = Object.keys(openAiVariantPlans).map((variant) =>
+        buildOpenAiStyle({ consultation, variant, previewUrl: previewAssets[variant]?.assetUrl || "", sessionId })
+      );
+      const styles = Object.keys(openAiVariantPlans).map((variant) => ({
+        ...buildOpenAiStyle({ consultation, variant, previewUrl: previewAssets[variant]?.displayUrl || previewAssets[variant]?.assetUrl || "", sessionId }),
+        assetPreviewUrl: previewAssets[variant]?.assetUrl || "",
+        selectedReferenceAssetUrl: previewAssets[variant]?.assetUrl || ""
+      }));
+      const historyItem = await getUserMemory().upsertGeneration(historyOwner, {
+        id: sessionId,
+        status: "recommendations_ready",
+        title: "Recommandations personnalisees",
+        sourceLabel: "Photo personnelle",
+        faceShape: "morphologie personnalisee",
+        consultation,
+        originalImageUrl,
+        recommendations: storedStyles.map(style => ({
+          id: style.id,
+          styleName: style.name,
+          previewUrl: style.previewUrl,
+          assetPreviewUrl: style.previewUrl,
+          color: style.color,
+          whyItWorks: style.whyItWorks
+        }))
+      });
+
+      return {
+        faceShape: "morphologie personnalisee",
+        hairTexture: "Texture detectee depuis la photo chargee",
+        skinTone: "Teint preserve depuis la photo chargee",
+        detectedGender: consultation.gender || "non-binary",
+        professionalAdvice: buildProfessionalMorphologyAdvice(consultation),
+        recommendedStyles: await withPrivateGeneratedAssetAccessForOwner(styles, historyOwner),
+        generationSessionId: sessionId,
+        quota,
+        historyItem: await withPrivateGeneratedAssetAccessForOwner(historyItem, historyOwner)
+      };
+    } catch (error) {
+      await releaseOpenAiReservation(reservation);
+      throw error;
+    }
+  } finally {
+    releaseGenerationLock();
+  }
 };
 
 const generateOpenAiSelectedResult = async (req, payload) => {
+  const historyOwner = await requireAuthenticatedUserOwner(
+    req,
+    payload,
+    "Connexion requise pour finaliser une photo personnelle."
+  );
+  const releaseGenerationLock = acquireOpenAiGenerationLock(historyOwner);
+
+  try {
   const source = imageDataUrlFromPayload(payload);
   const consultation = payload.consultation || {};
   const style = normalizeStyle(payload.style || {});
   const combo = comboFromConsultation(consultation);
   const sourceHash = sourceHashFromImage(source);
-  const session = await getOpenAiFinalSession({ req, payload, sourceHash, combo });
-  const prompt = buildOpenAiFinalPrompt({ consultation, style });
-  const size = process.env.OPENAI_FINAL_SIZE || process.env.OPENAI_IMAGE_SIZE || "1024x1536";
-  const result = await callOpenAiImageEdit({ source, prompt, size });
-  const generatedImage = openAiImageFromResponse(result);
-  if (!generatedImage) throw Object.assign(new Error(`Le service image n'a pas retourne d'image: ${openAiErrorText(result)}`), { status: 502 });
+  let session = null;
+  try {
+    session = await getOpenAiFinalSession({ req, payload, sourceHash, combo, owner: historyOwner });
+    const selectedReferenceAssetPath = selectedReferenceAssetPathFromPayload(payload, style);
+    const selectedReference = await assertOpenAiSelectedRecommendationReference({
+      owner: historyOwner,
+      sessionId: session.sessionId,
+      combo,
+      selectedReferenceAssetPath,
+      styleId: style.id
+    });
+    const selectedReferenceSource = await imageSourceFromGeneratedOpenAiAsset(
+      selectedReference.selectedReferenceAssetPath,
+      "Image de la proposition selectionnee indisponible. Reprenez les recommandations depuis votre fiche resultat puis reessayez.",
+      historyOwner
+    );
+    const prompt = buildOpenAiFinalPrompt({ consultation, style, hasSelectedReference: true });
+    const size = process.env.OPENAI_FINAL_SIZE || process.env.OPENAI_IMAGE_SIZE || "1024x1536";
+    // Charge le traitement du fond avant l'appel payant; son echec n'invalide pas la coupe.
+    await preparePortraitBackground();
+    const result = await callOpenAiImageEdit({
+      source,
+      prompt,
+      size,
+      referenceImages: [{ source: selectedReferenceSource, filenamePrefix: "selected-recommendation" }]
+    });
+    const generatedImage = openAiImageFromResponse(result);
+    if (!generatedImage) throw Object.assign(new Error(`Le service image n'a pas retourne d'image: ${openAiErrorText(result)}`), { status: 502 });
 
-  const sheetBuffer = await downloadOpenAiImageBuffer(generatedImage);
-  const styleId = safeStyleId(style);
-  const urls = await cropOpenAiFinalViews({ sheetBuffer, sessionId: session.sessionId, combo, styleId });
-  await markOpenAiFinalSessionUsed(session);
-  const proposal = {
-    id: `openai-final-${styleId}`,
-    imageUrl: urls.front,
-    styleName: style.name,
-    description: style.description,
-    whyItWorks: `${style.whyItWorks || "Resultat final base sur la morphologie et les reglages choisis."} Planche finale generee puis decoupee localement.`,
-    color: style.color,
-    beardStyle: style.beardStyle,
-    additionalViews: {
-      left: urls.left,
-      right: urls.right,
-      back: urls.back
-    },
-    isPreparedAsset: true
-  };
-  const historyItem = await userMemory.upsertGeneration(ownerIdFromRequest(req, payload), {
-    id: session.sessionId,
-    status: "final_ready",
-    selectedProposalKey: style.id,
-    final: {
-      id: proposal.id,
-      imageUrl: proposal.imageUrl,
-      styleName: proposal.styleName,
-      description: proposal.description,
-      whyItWorks: proposal.whyItWorks,
-      color: proposal.color,
-      beardStyle: proposal.beardStyle,
-      additionalViews: proposal.additionalViews
+    const sheetBuffer = await downloadOpenAiImageBuffer(generatedImage);
+    const styleId = safeStyleId(style);
+    const createdAt = new Date().toISOString();
+    const finalHistoryId = `${session.sessionId}-final-${styleId}-${Date.now().toString(36)}`.slice(0, 120);
+    // Une nouvelle finale ne doit pas reecrire les vues d'une ancienne fiche de la meme coupe.
+    const finalAssetKey = `${styleId}-${randomBytes(6).toString("hex")}`;
+    const { assets: views, backgroundTreatment } = await cropOpenAiFinalViews({
+      sheetBuffer, sessionId: session.sessionId, combo, styleId: finalAssetKey, owner: historyOwner
+    });
+    await markOpenAiFinalSessionUsed(session);
+    const assetAdditionalViews = {
+      left: views.left?.assetUrl || "",
+      right: views.right?.assetUrl || "",
+      back: views.back?.assetUrl || ""
+    };
+    const displayAdditionalViews = {
+      left: views.left?.displayUrl || assetAdditionalViews.left,
+      right: views.right?.displayUrl || assetAdditionalViews.right,
+      back: views.back?.displayUrl || assetAdditionalViews.back
+    };
+    const proposal = {
+      id: `openai-final-${styleId}`,
+      imageUrl: views.front?.displayUrl || views.front?.assetUrl || "",
+      assetImageUrl: views.front?.assetUrl || "",
+      styleName: style.name,
+      description: style.description,
+      whyItWorks: `${style.whyItWorks || "Resultat final base sur la morphologie et les reglages choisis."} Resultat complet prepare selon la coupe selectionnee.`,
+      color: style.color,
+      beardStyle: style.beardStyle,
+      additionalViews: displayAdditionalViews,
+      assetAdditionalViews,
+      backgroundTreatment,
+      isPreparedAsset: true
+    };
+    const previousFinalIds = Array.isArray(selectedReference.historyItem.generatedFinalIds)
+      ? selectedReference.historyItem.generatedFinalIds
+      : [];
+    const existingFinal = selectedReference.historyItem.final || (
+      selectedReference.historyItem.status !== "recommendations_ready" && selectedReference.historyItem.imageUrl
+        ? {
+          id: `openai-final-${safeStyleId({ id: selectedReference.historyItem.selectedProposalKey || "previous" })}`,
+          imageUrl: selectedReference.historyItem.imageUrl,
+          styleName: selectedReference.historyItem.styleName || selectedReference.historyItem.title || "Resultat MorphoStyle",
+          description: selectedReference.historyItem.description || "",
+          whyItWorks: selectedReference.historyItem.whyItWorks || "",
+          color: selectedReference.historyItem.color || "Naturel",
+          beardStyle: selectedReference.historyItem.beardStyle || "Aucune",
+          additionalViews: selectedReference.historyItem.additionalViews || {}
+        }
+        : null
+    );
+    const existingFinalCopyId = `${session.sessionId}-final-existing-${safeStyleId({ id: selectedReference.historyItem.selectedProposalKey || "previous" })}`.slice(0, 120);
+    const generatedFinalIds = [
+      finalHistoryId,
+      ...(existingFinal?.imageUrl ? [existingFinalCopyId] : []),
+      ...previousFinalIds
+    ].filter(Boolean).filter((value, index, values) => values.indexOf(value) === index).slice(0, 24);
+
+    if (existingFinal?.imageUrl && !previousFinalIds.includes(existingFinalCopyId)) {
+      await getUserMemory().upsertGeneration(historyOwner, {
+        id: existingFinalCopyId,
+        status: "final_ready",
+        title: existingFinal.styleName || selectedReference.historyItem.title || "Resultat MorphoStyle",
+        sourceLabel: selectedReference.historyItem.sourceLabel || "Photo personnelle",
+        faceShape: selectedReference.historyItem.faceShape || "morphologie personnalisee",
+        consultation: selectedReference.historyItem.consultation || consultation,
+        originalImageUrl: selectedReference.historyItem.originalImageUrl,
+        selectedProposalKey: selectedReference.historyItem.selectedProposalKey || "",
+        selectedProposalAssetUrl: selectedReference.historyItem.selectedProposalAssetUrl || "",
+        recommendationSessionId: session.sessionId,
+        parentGenerationId: session.sessionId,
+        recommendations: selectedReference.historyItem.recommendations || [],
+        createdAt: selectedReference.historyItem.updatedAt || selectedReference.historyItem.createdAt || createdAt,
+        final: existingFinal
+      });
     }
-  });
 
-  return {
-    ...proposal,
-    historyItem
-  };
+    await getUserMemory().upsertGeneration(historyOwner, {
+      id: session.sessionId,
+      status: "recommendations_ready",
+      title: selectedReference.historyItem.title || "Recommandations personnalisees",
+      sourceLabel: selectedReference.historyItem.sourceLabel || "Photo personnelle",
+      faceShape: selectedReference.historyItem.faceShape || "morphologie personnalisee",
+      consultation: selectedReference.historyItem.consultation || consultation,
+      originalImageUrl: selectedReference.historyItem.originalImageUrl,
+      recommendations: selectedReference.historyItem.recommendations || [],
+      selectedProposalKey: style.id,
+      selectedProposalAssetUrl: selectedReference.selectedReferenceAssetPath,
+      generatedFinalIds,
+      lastFinalGeneratedAt: createdAt,
+      final: undefined,
+      imageUrl: undefined,
+      additionalViews: undefined
+    });
+
+    const historyItem = await getUserMemory().upsertGeneration(historyOwner, {
+      id: finalHistoryId,
+      status: "final_ready",
+      title: proposal.styleName || "Resultat MorphoStyle",
+      sourceLabel: selectedReference.historyItem.sourceLabel || "Photo personnelle",
+      faceShape: selectedReference.historyItem.faceShape || "morphologie personnalisee",
+      consultation: selectedReference.historyItem.consultation || consultation,
+      originalImageUrl: selectedReference.historyItem.originalImageUrl,
+      selectedProposalKey: style.id,
+      selectedProposalAssetUrl: selectedReference.selectedReferenceAssetPath,
+      recommendationSessionId: session.sessionId,
+      parentGenerationId: session.sessionId,
+      recommendations: selectedReference.historyItem.recommendations || [],
+      createdAt,
+      final: {
+        id: proposal.id,
+        imageUrl: proposal.assetImageUrl || proposal.imageUrl,
+        styleName: proposal.styleName,
+        description: proposal.description,
+        whyItWorks: proposal.whyItWorks,
+        color: proposal.color,
+        beardStyle: proposal.beardStyle,
+        backgroundTreatment: proposal.backgroundTreatment,
+        additionalViews: proposal.assetAdditionalViews || proposal.additionalViews
+      }
+    });
+
+    return {
+      ...await withPrivateGeneratedAssetAccessForOwner(proposal, historyOwner),
+      historyItem: await withPrivateGeneratedAssetAccessForOwner(historyItem, historyOwner)
+    };
+  } catch (error) {
+    await releaseOpenAiAdditionalFinalReservation(session?.extraFinalReservation);
+    throw error;
+  }
+  } finally {
+    releaseGenerationLock();
+  }
 };
 
 const getLocalComfyApi = () => process.env.LOCAL_COMFY_API || process.env.COMFY_API_URL || DEFAULT_LOCAL_COMFY_API;
@@ -3251,6 +4275,7 @@ const handleApi = async (req, res) => {
       existsSync(process.env.LOCAL_STABLEHAIR_SCRIPT || DEFAULT_LOCAL_STABLEHAIR_SCRIPT) &&
       existsSync(process.env.LOCAL_PYTHON_EXECUTABLE || DEFAULT_LOCAL_PYTHON_EXECUTABLE) &&
       existsSync(process.env.LOCAL_STABLEHAIR_REPO_ROOT || DEFAULT_LOCAL_STABLEHAIR_REPO_ROOT);
+    const userMemory = getUserMemory();
     sendJson(res, 200, {
       ok: true,
       provider,
@@ -3263,6 +4288,12 @@ const handleApi = async (req, res) => {
       openAiExtraTrialCodeConfigured: getOpenAiExtraTrialCodeEntries().length > 0,
       openAiExtraTrialUses: getOpenAiExtraTrialUses(),
       sharpAvailable: Boolean(loadSharp()),
+      portraitBackground: getPortraitBackgroundStatus(),
+      userStorage: userMemory.backend,
+      userStorageMysqlRequired: userMemory.mysqlRequired,
+      userStorageMysqlConfigured: userMemory.mysqlConfigured,
+      userStorageMysqlAvailable: userMemory.mysqlAvailable,
+      userStorageJsonFallbackEnabled: userMemory.jsonFallbackEnabled,
       falEnabled: false,
       freeFallbacks: provider === "free-chain" || provider === "ai-horde",
       localComfyAvailable,
@@ -3290,6 +4321,332 @@ const handleApi = async (req, res) => {
     return true;
   }
 
+  if (req.method === "POST" && apiPath === "/api/auth/register") {
+    try {
+      const payload = await readJsonBody(req);
+      const session = await registerUserAccount(req, payload);
+      if (session.token) res.setHeader("Set-Cookie", authCookieHeader(session.token, req));
+      sendJson(res, 200, { ok: true, ...publicSessionPayload(session) });
+    } catch (error) {
+      sendJson(res, error.status || 500, {
+        ok: false,
+        error: error.message || "Creation du compte impossible."
+      });
+    }
+    return true;
+  }
+
+  if (req.method === "POST" && apiPath === "/api/auth/login") {
+    try {
+      const payload = await readJsonBody(req);
+      const session = await loginUserAccount(req, payload);
+      if (session.token) res.setHeader("Set-Cookie", authCookieHeader(session.token, req));
+      sendJson(res, 200, { ok: true, ...publicSessionPayload(session) });
+    } catch (error) {
+      sendJson(res, error.status || 500, {
+        ok: false,
+        error: error.message || "Connexion impossible."
+      });
+    }
+    return true;
+  }
+
+  if (req.method === "POST" && apiPath === "/api/auth/logout") {
+    try {
+      const payload = await readJsonBody(req);
+      const session = await logoutUserAccount(req, payload);
+      res.setHeader("Set-Cookie", clearAuthCookieHeader(req));
+      sendJson(res, 200, { ok: true, ...session });
+    } catch (error) {
+      res.setHeader("Set-Cookie", clearAuthCookieHeader(req));
+      sendJson(res, error.status || 500, {
+        ok: false,
+        error: error.message || "Deconnexion impossible."
+      });
+    }
+    return true;
+  }
+
+  if (req.method === "GET" && apiPath === "/api/admin/me") {
+    try {
+      const payload = payloadFromUrlQuery(req);
+      const admin = await requireAdminOwner(req, payload);
+      sendJson(res, 200, { ok: true, admin });
+    } catch (error) {
+      sendJson(res, error.status || 500, {
+        ok: false,
+        error: error.message || "Acces administrateur indisponible."
+      });
+    }
+    return true;
+  }
+
+  if (req.method === "GET" && apiPath === "/api/admin/dashboard") {
+    try {
+      const payload = payloadFromUrlQuery(req);
+      const admin = await requireAdminOwner(req, payload);
+      const overview = await getUserMemory().getAdminOverview();
+      const users = await getUserMemory().listAdminUsers({ limit: 8 });
+      const generations = await getUserMemory().listAdminGenerations({ limit: 12 });
+      sendJson(res, 200, { ok: true, admin, overview, users, generations });
+    } catch (error) {
+      sendJson(res, error.status || 500, {
+        ok: false,
+        error: error.message || "Tableau administrateur indisponible."
+      });
+    }
+    return true;
+  }
+
+  if (req.method === "GET" && apiPath === "/api/admin/users") {
+    try {
+      const payload = payloadFromUrlQuery(req);
+      await requireAdminOwner(req, payload);
+      const users = await getUserMemory().listAdminUsers({
+        search: payload.search,
+        limit: payload.limit || 80
+      });
+      sendJson(res, 200, { ok: true, users });
+    } catch (error) {
+      sendJson(res, error.status || 500, {
+        ok: false,
+        error: error.message || "Liste utilisateurs indisponible."
+      });
+    }
+    return true;
+  }
+
+  if (req.method === "GET" && apiPath === "/api/admin/users/detail") {
+    try {
+      const payload = payloadFromUrlQuery(req);
+      await requireAdminOwner(req, payload);
+      const user = await getUserMemory().getAdminUserDetail({
+        userId: payload.userId,
+        limit: payload.limit || 80
+      });
+      sendJson(res, 200, { ok: true, user });
+    } catch (error) {
+      sendJson(res, error.status || 500, {
+        ok: false,
+        error: error.message || "Fiche utilisateur indisponible."
+      });
+    }
+    return true;
+  }
+
+  if (req.method === "GET" && apiPath === "/api/admin/generations/detail") {
+    try {
+      const payload = payloadFromUrlQuery(req);
+      await requireAdminOwner(req, payload);
+      const generation = await getUserMemory().getAdminGenerationDetail({
+        ownerType: payload.ownerType,
+        ownerId: payload.ownerId,
+        generationId: payload.generationId
+      });
+      sendJson(res, 200, { ok: true, generation: withPrivateGeneratedAssetAccess(generation) });
+    } catch (error) {
+      sendJson(res, error.status || 500, {
+        ok: false,
+        error: error.message || "Fiche generation indisponible."
+      });
+    }
+    return true;
+  }
+
+  if (req.method === "GET" && apiPath === "/api/admin/generations") {
+    try {
+      const payload = payloadFromUrlQuery(req);
+      await requireAdminOwner(req, payload);
+      const generations = await getUserMemory().listAdminGenerations({
+        search: payload.search,
+        limit: payload.limit || 80
+      });
+      sendJson(res, 200, { ok: true, generations });
+    } catch (error) {
+      sendJson(res, error.status || 500, {
+        ok: false,
+        error: error.message || "Liste generations indisponible."
+      });
+    }
+    return true;
+  }
+
+  if (req.method === "GET" && apiPath === "/api/admin/credits") {
+    try {
+      const payload = payloadFromUrlQuery(req);
+      await requireAdminOwner(req, payload);
+      const ownerType = payload.ownerType || "user";
+      const ownerId = payload.ownerId || payload.userId || "";
+      const wallet = await getUserMemory().getCreditWallet({ ownerType, ownerId });
+      const ledger = await getUserMemory().listCreditLedgerForAdmin({
+        ownerType,
+        ownerId,
+        limit: payload.limit || 40
+      });
+      sendJson(res, 200, { ok: true, wallet, ledger });
+    } catch (error) {
+      sendJson(res, error.status || 500, {
+        ok: false,
+        error: error.message || "Credits indisponibles."
+      });
+    }
+    return true;
+  }
+
+  if (req.method === "GET" && apiPath === "/api/admin/trial-code") {
+    try {
+      const payload = payloadFromUrlQuery(req);
+      await requireAdminOwner(req, payload);
+      const [trialCode, history] = await Promise.all([
+        getUserMemory().getAdminTrialPromoCode({
+          defaultUses: getOpenAiExtraTrialUses()
+        }),
+        getUserMemory().listAdminTrialPromoCodes({ limit: 20 })
+      ]);
+      sendJson(res, 200, { ok: true, trialCode, history });
+    } catch (error) {
+      sendJson(res, error.status || 500, {
+        ok: false,
+        error: error.message || "Code bonus indisponible."
+      });
+    }
+    return true;
+  }
+
+  if (req.method === "POST" && apiPath === "/api/admin/trial-code") {
+    try {
+      const payload = await readJsonBody(req);
+      const admin = await requireAdminOwner(req, payload);
+      const trialCode = await getUserMemory().saveAdminTrialPromoCode({
+        actorUserId: admin.id,
+        code: payload.code,
+        usesAdded: payload.usesAdded || getOpenAiExtraTrialUses(),
+        regenerate: Boolean(payload.regenerate)
+      });
+      const history = await getUserMemory().listAdminTrialPromoCodes({ limit: 20 });
+      sendJson(res, 200, { ok: true, trialCode, history });
+    } catch (error) {
+      sendJson(res, error.status || 500, {
+        ok: false,
+        error: error.message || "Mise a jour du code bonus impossible."
+      });
+    }
+    return true;
+  }
+
+  if (req.method === "GET" && apiPath === "/api/admin/audit-log") {
+    try {
+      const payload = payloadFromUrlQuery(req);
+      await requireAdminOwner(req, payload);
+      const entries = await getUserMemory().listAdminAuditLog({
+        search: payload.search,
+        limit: payload.limit || 80
+      });
+      sendJson(res, 200, { ok: true, entries });
+    } catch (error) {
+      sendJson(res, error.status || 500, {
+        ok: false,
+        error: error.message || "Journal administrateur indisponible."
+      });
+    }
+    return true;
+  }
+
+  if (req.method === "POST" && apiPath === "/api/admin/users/status") {
+    try {
+      const payload = await readJsonBody(req);
+      const admin = await requireAdminOwner(req, payload);
+      const result = await getUserMemory().setUserStatusForAdmin({
+        actorUserId: admin.id,
+        userId: payload.userId,
+        status: payload.status
+      });
+      const removedPublicGenerations = Array.isArray(result?.removedPublicGenerations)
+        ? result.removedPublicGenerations
+        : [];
+      for (const item of removedPublicGenerations) {
+        if (item?.publicGenerationId) {
+          await removePublicGeneration(item.publicGenerationId, item.publicGeneration).catch(() => false);
+        }
+      }
+      const user = result?.user || result;
+      sendJson(res, 200, { ok: true, user });
+    } catch (error) {
+      sendJson(res, error.status || 500, {
+        ok: false,
+        error: error.message || "Mise a jour utilisateur impossible."
+      });
+    }
+    return true;
+  }
+
+  if (req.method === "POST" && apiPath === "/api/admin/credits/adjust") {
+    try {
+      const payload = await readJsonBody(req);
+      const admin = await requireAdminOwner(req, payload);
+      const result = await getUserMemory().adjustCreditsForAdmin({
+        actorUserId: admin.id,
+        ownerType: payload.ownerType || "user",
+        ownerId: payload.ownerId || payload.userId || "",
+        amount: payload.amount,
+        reason: payload.reason
+      });
+      sendJson(res, 200, { ok: true, ...result });
+    } catch (error) {
+      sendJson(res, error.status || 500, {
+        ok: false,
+        error: error.message || "Ajustement credits impossible."
+      });
+    }
+    return true;
+  }
+
+  if (req.method === "POST" && apiPath === "/api/admin/generations/hide") {
+    try {
+      const payload = await readJsonBody(req);
+      const admin = await requireAdminOwner(req, payload);
+      const generation = await getUserMemory().hideGenerationForAdmin({
+        actorUserId: admin.id,
+        ownerType: payload.ownerType,
+        ownerId: payload.ownerId,
+        generationId: payload.generationId
+      });
+      if (generation.publicGenerationId) {
+        await removePublicGeneration(generation.publicGenerationId);
+      }
+      sendJson(res, 200, { ok: true, generation });
+    } catch (error) {
+      sendJson(res, error.status || 500, {
+        ok: false,
+        error: error.message || "Masquage generation impossible."
+      });
+    }
+    return true;
+  }
+
+  if (req.method === "POST" && apiPath === "/api/admin/generations/unpublish") {
+    try {
+      const payload = await readJsonBody(req);
+      const admin = await requireAdminOwner(req, payload);
+      const result = await getUserMemory().unpublishGenerationForAdmin({
+        actorUserId: admin.id,
+        ownerType: payload.ownerType,
+        ownerId: payload.ownerId,
+        generationId: payload.generationId
+      });
+      if (result.publicGenerationId) {
+        await removePublicGeneration(result.publicGenerationId, result.publicGeneration);
+      }
+      sendJson(res, 200, { ok: true, ...result });
+    } catch (error) {
+      sendJson(res, error.status || 500, {
+        ok: false,
+        error: error.message || "Retrait de la vitrine impossible."
+      });
+    }
+    return true;
+  }
+
   if (req.method === "POST" && apiPath === "/api/session/guest") {
     try {
       const payload = await readJsonBody(req);
@@ -3307,8 +4664,12 @@ const handleApi = async (req, res) => {
   if (req.method === "GET" && apiPath === "/api/me") {
     try {
       const payload = payloadFromUrlQuery(req);
+      const token = authTokenFromRequest(req);
       const session = await getGuestSessionState(req, payload);
-      sendJson(res, 200, { ok: true, ...session });
+      if (token && session.owner?.type === "user") {
+        res.setHeader("Set-Cookie", authCookieHeader(token, req));
+      }
+      sendJson(res, 200, { ok: true, ...publicSessionPayload(session) });
     } catch (error) {
       sendJson(res, error.status || 500, {
         ok: false,
@@ -3318,17 +4679,124 @@ const handleApi = async (req, res) => {
     return true;
   }
 
+  if (req.method === "GET" && apiPath.startsWith("/api/me/generations/") && apiPath.endsWith("/assets")) {
+    try {
+      const payload = payloadFromUrlQuery(req);
+      const owner = await ownerFromRequest(req, payload);
+      if (owner.type === "guest") await getUserMemory().ensureGuest(owner.id);
+      const generationId = decodeURIComponent(
+        apiPath.slice("/api/me/generations/".length, -"/assets".length)
+      );
+      const generations = await getUserMemory().listGenerations(owner, { scope: "all", limit: 240 });
+      const generation = generations.find(item =>
+        item.id === generationId ||
+        item.personalGenerationId === generationId ||
+        item.publicGenerationId === generationId
+      );
+
+      if (!generation) {
+        throw Object.assign(new Error("Fiche introuvable pour ce compte."), { status: 404 });
+      }
+
+      const hydrated = await hydratePrivateAssetsForHistoryItem(generation, owner);
+      sendJson(res, 200, {
+        ok: true,
+        generation: await withPrivateGeneratedAssetAccessForOwner(hydrated, owner)
+      });
+    } catch (error) {
+      sendJson(res, error.status || 500, {
+        ok: false,
+        error: error.message || "Images de fiche indisponibles."
+      });
+    }
+    return true;
+  }
+
   if (req.method === "GET" && apiPath === "/api/me/generations") {
     try {
       const payload = payloadFromUrlQuery(req);
-      const ownerId = ownerIdFromRequest(req, payload);
-      await userMemory.ensureGuest(ownerId);
-      const generations = await userMemory.listGenerations(ownerId, { scope: payload.scope || "today" });
-      sendJson(res, 200, { ok: true, generations });
+      const owner = await ownerFromRequest(req, payload);
+      if (owner.type === "guest") await getUserMemory().ensureGuest(owner.id);
+      const scope = payload.scope || "today";
+      const requestedLimit = Number(payload.limit || (scope === "all" ? 120 : 48));
+      const limit = Number.isFinite(requestedLimit)
+        ? Math.max(1, Math.min(240, Math.round(requestedLimit)))
+        : scope === "all" ? 120 : 48;
+      const generations = await getUserMemory().listGenerations(owner, { scope, limit });
+      sendJson(res, 200, {
+        ok: true,
+        generations: await withPrivateGeneratedAssetAccessForOwner(generations, owner)
+      });
     } catch (error) {
       sendJson(res, error.status || 500, {
         ok: false,
         error: error.message || "Historique personnel indisponible."
+      });
+    }
+    return true;
+  }
+
+  if (req.method === "POST" && apiPath === "/api/me/generations") {
+    try {
+      const payload = await readJsonBody(req);
+      const owner = await ownerFromRequest(req, payload);
+      if (owner.type === "guest") await getUserMemory().ensureGuest(owner.id);
+      const item = await stripPrivateGeneratedAssetAccessForOwner(payload.generation || {}, owner);
+      const saved = await getUserMemory().upsertGeneration(owner, {
+        id: item.id || item.imageUrl,
+        status: item.publicGenerationId ? "published" : "final_ready",
+        title: item.styleName || "Resultat MorphoStyle",
+        sourceLabel: item.sourceLabel || "Photo personnelle",
+        faceShape: item.faceShape || "morphologie personnalisee",
+        consultation: item.consultation,
+        originalImageUrl: item.originalImageUrl,
+        publicGenerationId: item.publicGenerationId,
+        createdAt: item.createdAt,
+        final: {
+          id: item.id,
+          imageUrl: item.imageUrl,
+          styleName: item.styleName,
+          color: item.color,
+          additionalViews: item.additionalViews
+        }
+      });
+      sendJson(res, 200, {
+        ok: true,
+        generation: await withPrivateGeneratedAssetAccessForOwner(saved, owner)
+      });
+    } catch (error) {
+      sendJson(res, error.status || 500, {
+        ok: false,
+        error: error.message || "Sauvegarde historique impossible."
+      });
+    }
+    return true;
+  }
+
+  if (req.method === "POST" && apiPath === "/api/me/generations/delete") {
+    try {
+      const payload = await readJsonBody(req);
+      const owner = await ownerFromRequest(req, payload);
+      if (owner.type === "guest") await getUserMemory().ensureGuest(owner.id);
+      const deleted = await getUserMemory().deleteGenerationForOwner(
+        owner,
+        {
+          ...stripPrivateGeneratedAssetAccess(payload),
+          generationId: payload.personalGenerationId || payload.generationId || payload.publicGenerationId,
+          candidateIds: Array.isArray(payload.candidateIds) ? payload.candidateIds : []
+        }
+      );
+      if (deleted.publicGenerationId) {
+        await removePublicGeneration(deleted.publicGenerationId);
+      }
+      sendJson(res, 200, {
+        ok: true,
+        generation: await withPrivateGeneratedAssetAccessForOwner(deleted, owner)
+      });
+    } catch (error) {
+      sendJson(res, error.status || 500, {
+        ok: false,
+        error: error.message || "Suppression fiche impossible."
       });
     }
     return true;
@@ -3410,10 +4878,12 @@ const handleApi = async (req, res) => {
     return true;
   }
 
-  if (req.method === "GET" && req.url === "/api/public-generations") {
+  if (req.method === "GET" && apiPath === "/api/public-generations") {
     try {
+      const payload = payloadFromUrlQuery(req);
+      const limit = normalizePublicGenerationLimit(payload.limit);
       const generations = await readPublicGenerations();
-      sendJson(res, 200, { ok: true, generations: generations.slice(0, 48) });
+      sendJson(res, 200, { ok: true, generations: generations.slice(0, limit) });
     } catch (error) {
       sendJson(res, 500, {
         ok: false,
@@ -3423,14 +4893,22 @@ const handleApi = async (req, res) => {
     return true;
   }
 
-  if (req.method === "POST" && req.url === "/api/public-generations") {
+  if (req.method === "POST" && apiPath === "/api/public-generations") {
     try {
       const payload = await readJsonBody(req);
-      const generation = await addPublicGeneration(payload);
-      const ownerId = payload.clientId ? ownerIdFromRequest(req, payload) : "";
-      const personalGenerationId = payload.personalGenerationId || payload.generationId || payload.proposal?.id || "";
-      if (ownerId && personalGenerationId) {
-        await userMemory.markPublished(ownerId, personalGenerationId, generation.id);
+      const owner = await requireAuthenticatedUserOwner(
+        req,
+        payload,
+        "Connexion requise pour publier dans la vitrine."
+      );
+      const ownedGeneration = await findOwnedGenerationForPublication(owner, payload);
+      const publicPayload = publicGenerationPayloadFromOwnedGeneration(payload, ownedGeneration);
+      const generation = await addPublicGeneration(publicPayload);
+      const personalGenerationId = ownedGeneration.personalGenerationId || ownedGeneration.id;
+      const published = await getUserMemory().markPublished(owner, personalGenerationId, generation.id, generation);
+      if (!published) {
+        await removePublicGeneration(generation.id).catch(() => false);
+        throw Object.assign(new Error("Fiche personnelle introuvable pour confirmer la publication."), { status: 403 });
       }
       sendJson(res, 200, { ok: true, generation });
     } catch (error) {
@@ -3446,7 +4924,7 @@ const handleApi = async (req, res) => {
     try {
       const payload = await readJsonBody(req);
       const proposal = await generateOpenAiSelectedResult(req, payload);
-      sendJson(res, 200, { ok: true, proposal });
+      sendJson(res, 200, { ok: true, ...proposal, proposal });
     } catch (error) {
       const status = error.status || (error.message === "IMAGE_TOO_LARGE" ? 413 : 500);
       sendJson(res, status, {
@@ -3466,10 +4944,9 @@ const serveGeneratedAlibabaAsset = async (req, res) => {
   if (!requestedPath.startsWith("/generated-alibaba/")) return false;
 
   const relativePath = requestedPath.replace(/^\/generated-alibaba\//, "");
-  const safePath = path.normalize(relativePath).replace(/^(\.\.[/\\])+/, "");
-  const filePath = path.join(GENERATED_ALIBABA_DIR, safePath);
+  const filePath = resolveInsideDir(GENERATED_ALIBABA_DIR, relativePath);
 
-  if (!filePath.startsWith(GENERATED_ALIBABA_DIR)) {
+  if (!filePath) {
     res.writeHead(403);
     res.end("Forbidden");
     return true;
@@ -3495,10 +4972,9 @@ const servePublicGalleryAsset = async (req, res) => {
   if (!requestedPath.startsWith("/public-gallery/")) return false;
 
   const relativePath = requestedPath.replace(/^\/public-gallery\//, "");
-  const safePath = path.normalize(relativePath).replace(/^(\.\.[/\\])+/, "");
-  const filePath = path.join(PUBLIC_GALLERY_DIR, safePath);
+  const filePath = resolveInsideDir(PUBLIC_GALLERY_DIR, relativePath);
 
-  if (!filePath.startsWith(PUBLIC_GALLERY_DIR)) {
+  if (!filePath) {
     res.writeHead(403);
     res.end("Forbidden");
     return true;
@@ -3512,6 +4988,17 @@ const servePublicGalleryAsset = async (req, res) => {
     });
     res.end(data);
   } catch {
+    const stored = await readPersistedImageAsset(requestedPath);
+    if (stored?.buffer) {
+      await mkdir(path.dirname(filePath), { recursive: true }).catch(() => null);
+      await writeFile(filePath, stored.buffer).catch(() => null);
+      res.writeHead(200, {
+        "Content-Type": stored.contentType || mimeByExt.get(path.extname(filePath)) || "application/octet-stream",
+        "Cache-Control": "public, max-age=31536000, immutable"
+      });
+      res.end(stored.buffer);
+      return true;
+    }
     sendJson(res, 404, { ok: false, error: "Image vitrine introuvable." });
   }
 
@@ -3521,26 +5008,38 @@ const servePublicGalleryAsset = async (req, res) => {
 const serveGeneratedOpenAiAsset = async (req, res) => {
   const parsedUrl = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
   const requestedPath = decodeURIComponent(parsedUrl.pathname);
-  if (!requestedPath.startsWith("/generated-openai/")) return false;
+  if (!requestedPath.startsWith(GENERATED_OPENAI_ROUTE_PREFIX)) return false;
 
-  const relativePath = requestedPath.replace(/^\/generated-openai\//, "");
-  const safePath = path.normalize(relativePath).replace(/^(\.\.[/\\])+/, "");
-  const filePath = path.join(GENERATED_OPENAI_DIR, safePath);
+  const assetPath = normalizeGeneratedOpenAiAssetPath(requestedPath);
+  const expiresAt = Number(parsedUrl.searchParams.get("expires") || 0);
+  const signature = parsedUrl.searchParams.get("sig") || "";
 
-  if (!filePath.startsWith(GENERATED_OPENAI_DIR)) {
-    res.writeHead(403);
-    res.end("Forbidden");
+  if (!assetPath || !verifyGeneratedOpenAiAssetSignature(assetPath, expiresAt, signature)) {
+    sendJson(res, 403, { ok: false, error: "Lien image privee expire ou invalide." });
     return true;
   }
+
+  const filePath = resolveGeneratedOpenAiAssetPath(assetPath);
 
   try {
     const data = await readFile(filePath);
     res.writeHead(200, {
       "Content-Type": mimeByExt.get(path.extname(filePath)) || "application/octet-stream",
-      "Cache-Control": "public, max-age=31536000, immutable"
+      "Cache-Control": "private, max-age=3600"
     });
     res.end(data);
   } catch {
+    const stored = await readPersistedImageAsset(assetPath);
+    if (stored?.buffer) {
+      await mkdir(path.dirname(filePath), { recursive: true }).catch(() => null);
+      await writeFile(filePath, stored.buffer).catch(() => null);
+      res.writeHead(200, {
+        "Content-Type": stored.contentType || mimeByExt.get(path.extname(filePath)) || "application/octet-stream",
+        "Cache-Control": "private, max-age=3600"
+      });
+      res.end(stored.buffer);
+      return true;
+    }
     sendJson(res, 404, { ok: false, error: "Image generee introuvable." });
   }
 
@@ -3581,10 +5080,13 @@ const serveStatic = async (req, res) => {
   }
 };
 
-export const loadMorphoStyleEnvironment = loadLocalEnv;
+export const loadMorphoStyleEnvironment = async () => {
+  await loadLocalEnv();
+  void preparePortraitBackground();
+};
 
 export const handleMorphoStyleRequest = async (req, res) => {
-  res.setHeader("X-Content-Type-Options", "nosniff");
+  applySecurityHeaders(res);
 
   if (await handleApi(req, res)) return;
   if (req.method === "GET" || req.method === "HEAD") {

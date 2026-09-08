@@ -1,5 +1,58 @@
 import { GoogleGenAI, Type } from "@google/genai";
 import { AnalysisResult, ConsultationData, AdditionalViews, HairstyleRecipe, Proposal, PublicGeneration, StyleRecommendation } from "../types";
+export {
+  activateOpenAiTrialCode,
+  adjustAdminCredits,
+  clearStoredSession,
+  deletePersonalGeneration,
+  fetchAdminAuditLog,
+  fetchAdminCredits,
+  fetchAdminDashboard,
+  fetchAdminGenerationDetail,
+  fetchAdminGenerations,
+  fetchAdminTrialCode,
+  fetchAdminUserDetail,
+  fetchAdminUsers,
+  fetchGuestSession,
+  fetchPersonalGenerationAssets,
+  fetchPersonalGenerations,
+  fetchPublicGenerations,
+  generateAlibabaUploadRecommendations,
+  generateOpenAiSelectedResult,
+  generateOpenAiUploadRecommendations,
+  getMorphoClientId,
+  getStoredAccount,
+  getStoredAuthToken,
+  hideAdminGeneration,
+  isOpenAiUploadStyle,
+  isStoredAdmin,
+  loginAccount,
+  logoutAccount,
+  publishPublicGeneration,
+  registerAccount,
+  saveAdminTrialCode,
+  savePersonalGeneration,
+  unpublishAdminGeneration,
+  updateAdminUserStatus
+} from "./morphoApi";
+
+export type {
+  AdminAuditEntry,
+  AdminCreditLedgerEntry,
+  AdminCreditWallet,
+  AdminDashboard,
+  AdminGeneration,
+  AdminGenerationDetail,
+  AdminOverview,
+  AdminTrialCode,
+  AdminTrialCodeState,
+  AdminUser,
+  AdminUserDetail,
+  AdminUserStatus,
+  MorphoOwner,
+  MorphoSession
+} from "./morphoApi";
+
 
 const MAX_RETRIES = 2;
 const INITIAL_DELAY = 1500;
@@ -13,13 +66,6 @@ const IMAGE_TO_IMAGE_ENDPOINT = process.env.IMAGE_TO_IMAGE_ENDPOINT || "/api/gen
 const IMAGE_TO_IMAGE_TIMEOUT_MS = Math.max(60000, Number(process.env.IMAGE_TO_IMAGE_TIMEOUT_MS || 180000));
 const USE_FREE_IMAGE_TO_IMAGE_FALLBACKS = process.env.FREE_IMAGE_TO_IMAGE_FALLBACKS === "true";
 const FREE_PREVIEW_ENDPOINT = process.env.FREE_PREVIEW_ENDPOINT || "/api/free-preview";
-const ALIBABA_UPLOAD_RECOMMENDATIONS_ENDPOINT = process.env.ALIBABA_UPLOAD_RECOMMENDATIONS_ENDPOINT || "/api/alibaba-upload-recommendations";
-const OPENAI_UPLOAD_RECOMMENDATIONS_ENDPOINT = process.env.OPENAI_UPLOAD_RECOMMENDATIONS_ENDPOINT || "/api/openai-upload-recommendations";
-const OPENAI_SELECTED_RESULT_ENDPOINT = process.env.OPENAI_SELECTED_RESULT_ENDPOINT || "/api/openai-selected-result";
-const OPENAI_ACTIVATE_TRIAL_CODE_ENDPOINT = process.env.OPENAI_ACTIVATE_TRIAL_CODE_ENDPOINT || "/api/openai-activate-trial-code";
-const PUBLIC_GENERATIONS_ENDPOINT = process.env.PUBLIC_GENERATIONS_ENDPOINT || "/api/public-generations";
-const GUEST_SESSION_ENDPOINT = process.env.GUEST_SESSION_ENDPOINT || "/api/session/guest";
-const PERSONAL_GENERATIONS_ENDPOINT = process.env.PERSONAL_GENERATIONS_ENDPOINT || "/api/me/generations";
 const PUTER_FLUX_MODEL = process.env.PUTER_FLUX_MODEL || "black-forest-labs/flux.1-kontext-pro";
 const HF_KONTEXT_SPACE_URL = (process.env.HF_KONTEXT_SPACE_URL || "https://black-forest-labs-flux-1-kontext-dev.hf.space").replace(/\/$/, "");
 const HF_KONTEXT_STEPS = Number(process.env.HF_KONTEXT_STEPS || 20);
@@ -65,6 +111,7 @@ const blobToDataUrl = (blob: Blob) =>
     reader.readAsDataURL(blob);
   });
 
+
 export const getRuntimeMode = () => RUNTIME_MODE;
 export const isDemoMode = () => RUNTIME_MODE === "demo";
 export const isFreeImageApiMode = () => USE_POLLINATIONS;
@@ -76,214 +123,6 @@ export const isHuggingFaceKontextImageToImageMode = () => USE_HF_KONTEXT_IMAGE_T
 export const isLocalRetouchImageToImageMode = () => USE_LOCAL_RETOUCH_IMAGE_TO_IMAGE;
 export const isImageToImageMode = () => USE_IMAGE_TO_IMAGE;
 
-export const getMorphoClientId = () => {
-  const key = "morphostyle_openai_client_id";
-  try {
-    const existing = window.localStorage.getItem(key);
-    if (existing) return existing;
-    const created = `ms-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
-    window.localStorage.setItem(key, created);
-    return created;
-  } catch {
-    return "morphostyle-browser-client";
-  }
-};
-
-const getOpenAiClientId = getMorphoClientId;
-
-type OpenAiServicePayload = {
-  error?: string;
-  quota?: AnalysisResult["quota"];
-  allowCodeActivation?: boolean;
-};
-
-const throwOpenAiServiceError = (payload: OpenAiServicePayload, status: number, fallback: string): never => {
-  const error = new Error(payload.error || `${fallback}: HTTP ${status}`) as Error & {
-    status?: number;
-    quota?: AnalysisResult["quota"];
-    allowCodeActivation?: boolean;
-  };
-  error.status = status;
-  error.quota = payload.quota;
-  error.allowCodeActivation = Boolean(payload.allowCodeActivation);
-  throw error;
-};
-
-export const isOpenAiUploadStyle = (style?: Pick<StyleRecommendation, "sourceProvider" | "id"> | null) =>
-  style?.sourceProvider === "openai-upload" || String(style?.id || "").startsWith("openai-upload-");
-
-export const generateOpenAiUploadRecommendations = async (
-  originalBase64: string,
-  consultation: ConsultationData
-): Promise<AnalysisResult> => {
-  const response = await fetchWithTimeout(OPENAI_UPLOAD_RECOMMENDATIONS_ENDPOINT, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      imageBase64: originalBase64,
-      consultation,
-      clientId: getOpenAiClientId()
-    })
-  }, 720000);
-
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok || !payload.ok) {
-    throwOpenAiServiceError(payload, response.status, "Service image indisponible");
-  }
-
-  return {
-    faceShape: payload.faceShape || "morphologie personnalisee",
-    hairTexture: payload.hairTexture || "Texture detectee depuis la photo",
-    skinTone: payload.skinTone || "Teint preserve",
-    detectedGender: payload.detectedGender || consultation.gender,
-    professionalAdvice: payload.professionalAdvice || "Photo chargee traitee pour une recommandation personnalisee.",
-    recommendedStyles: (payload.recommendedStyles || []) as StyleRecommendation[],
-    generationSessionId: payload.generationSessionId,
-    quota: payload.quota
-  };
-};
-
-export const generateOpenAiSelectedResult = async (
-  originalBase64: string,
-  consultation: ConsultationData,
-  style: StyleRecommendation,
-  generationSessionId = style.generationSessionId || ""
-) => {
-  const response = await fetchWithTimeout(OPENAI_SELECTED_RESULT_ENDPOINT, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      imageBase64: originalBase64,
-      consultation,
-      style,
-      generationSessionId,
-      clientId: getOpenAiClientId()
-    })
-  }, 720000);
-
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok || !payload.ok) {
-    throwOpenAiServiceError(payload, response.status, "Service image indisponible");
-  }
-
-  return payload.proposal;
-};
-
-export const activateOpenAiTrialCode = async (code: string) => {
-  const response = await fetchWithTimeout(OPENAI_ACTIVATE_TRIAL_CODE_ENDPOINT, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      code,
-      clientId: getOpenAiClientId()
-    })
-  }, 30000);
-
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok || !payload.ok) {
-    throwOpenAiServiceError(payload, response.status, "Activation du code impossible");
-  }
-
-  return payload as {
-    message: string;
-    usesAdded: number;
-    alreadyActivated?: boolean;
-    quota: AnalysisResult["quota"];
-  };
-};
-
-export const fetchGuestSession = async () => {
-  const response = await fetchWithTimeout(GUEST_SESSION_ENDPOINT, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ clientId: getMorphoClientId() })
-  }, 30000);
-
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok || !payload.ok) {
-    throw new Error(payload.error || `Session invite indisponible: HTTP ${response.status}`);
-  }
-
-  return payload as {
-    owner: { type: "guest"; id: string; status: string };
-    quota?: AnalysisResult["quota"];
-    generations?: PublicGeneration[];
-  };
-};
-
-export const fetchPersonalGenerations = async (scope: "today" | "all" = "today"): Promise<PublicGeneration[]> => {
-  const params = new URLSearchParams({
-    clientId: getMorphoClientId(),
-    scope
-  });
-  const response = await fetchWithTimeout(`${PERSONAL_GENERATIONS_ENDPOINT}?${params.toString()}`, {}, 30000);
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok || !payload.ok) {
-    throw new Error(payload.error || `Historique personnel indisponible: HTTP ${response.status}`);
-  }
-  return (payload.generations || []) as PublicGeneration[];
-};
-
-export const fetchPublicGenerations = async (): Promise<PublicGeneration[]> => {
-  const response = await fetchWithTimeout(PUBLIC_GENERATIONS_ENDPOINT, {}, 30000);
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok || !payload.ok) {
-    throw new Error(payload.error || `Historique public indisponible: HTTP ${response.status}`);
-  }
-  return (payload.generations || []) as PublicGeneration[];
-};
-
-export const publishPublicGeneration = async (payload: {
-  proposal: Proposal;
-  analysis: Pick<AnalysisResult, "faceShape">;
-  consultation: ConsultationData;
-  sourceLabel: string;
-}): Promise<PublicGeneration> => {
-  const response = await fetchWithTimeout(PUBLIC_GENERATIONS_ENDPOINT, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      ...payload,
-      clientId: getMorphoClientId(),
-      personalGenerationId: payload.proposal.id
-    })
-  }, 30000);
-
-  const result = await response.json().catch(() => ({}));
-  if (!response.ok || !result.ok) {
-    throw new Error(result.error || `Publication vitrine impossible: HTTP ${response.status}`);
-  }
-
-  return result.generation as PublicGeneration;
-};
-
-export const generateAlibabaUploadRecommendations = async (
-  originalBase64: string,
-  consultation: ConsultationData
-): Promise<AnalysisResult> => {
-  const response = await fetchWithTimeout(ALIBABA_UPLOAD_RECOMMENDATIONS_ENDPOINT, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      imageBase64: originalBase64,
-      consultation
-    })
-  }, 720000);
-
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok || !payload.ok) {
-    throw new Error(payload.error || `Service image indisponible: HTTP ${response.status}`);
-  }
-
-  return {
-    faceShape: payload.faceShape || "morphologie personnalisee",
-    hairTexture: payload.hairTexture || "Texture detectee depuis la photo",
-    skinTone: payload.skinTone || "Teint preserve",
-    detectedGender: payload.detectedGender || consultation.gender,
-    professionalAdvice: payload.professionalAdvice || "Photo chargee traitee avec la methode haute qualite.",
-    recommendedStyles: (payload.recommendedStyles || []) as StyleRecommendation[]
-  };
-};
 
 const normalizeStyle = (style: any) => ({
   id: style?.id || "demo-style",

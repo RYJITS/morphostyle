@@ -13,6 +13,8 @@ body {
 .profile-carousel-image {
   opacity: 0;
   transform: scale(1.04);
+  transition: opacity 220ms ease, transform 600ms ease;
+  will-change: opacity, transform;
 }
 
 .profile-carousel-image:first-child {
@@ -20,19 +22,19 @@ body {
   transform: scale(1);
 }
 
-.profile-card:hover .profile-carousel-image,
-.profile-card:focus-visible .profile-carousel-image {
-  animation: profile-carousel-fade 4.5s infinite both;
+.profile-card[data-carousel-ready="true"]:hover .profile-carousel-image[data-carousel-loaded="true"],
+.profile-card[data-carousel-ready="true"]:focus-visible .profile-carousel-image[data-carousel-loaded="true"] {
+  animation: profile-carousel-fade 4.5s infinite;
 }
 
 @keyframes profile-carousel-fade {
   0%,
-  17% {
+  22% {
     opacity: 1;
     transform: scale(1);
   }
 
-  23%,
+  30%,
   100% {
     opacity: 0;
     transform: scale(1.045);
@@ -40,8 +42,8 @@ body {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .profile-card:hover .profile-carousel-image,
-  .profile-card:focus-visible .profile-carousel-image {
+  .profile-card[data-carousel-ready="true"]:hover .profile-carousel-image[data-carousel-loaded="true"],
+  .profile-card[data-carousel-ready="true"]:focus-visible .profile-carousel-image[data-carousel-loaded="true"] {
     animation: none;
   }
 }
